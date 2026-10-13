@@ -1,0 +1,65 @@
+# AgentEDR default configuration (SPEC section 10).
+#
+# This file is the single source of defaults. /etc/agentedr/config.yaml (or
+# --config) is deep-merged on top: mappings merge key by key, lists and
+# scalars replace the default value entirely.
+
+version: 1
+
+agents:
+  - kind: claude-code
+    match:
+      exe_basename: ["claude"]
+      argv_contains: ["@anthropic-ai/claude-code", "/claude-code/cli"]
+    config_paths: ["~/.claude/settings.json", "~/.claude.json", "{workspace}/.claude/settings.json", "{workspace}/.claude/settings.local.json", "{workspace}/.mcp.json"]
+  - kind: codex
+    match:
+      exe_basename: ["codex"]
+    config_paths: ["~/.codex/config.toml"]
+  - kind: gemini-cli
+    match:
+      argv_contains: ["@google/gemini-cli"]
+    config_paths: ["~/.gemini/settings.json", "{workspace}/.gemini/settings.json"]
+  - kind: cursor-agent
+    match:
+      exe_basename: ["cursor-agent"]
+    config_paths: ["~/.cursor/mcp.json", "{workspace}/.cursor/mcp.json"]
+
+sensor:
+  binary: null              # null = bundled
+  mode: auto                # auto | lsm | fentry
+  ringbuf_kib: 256
+  stats_interval_s: 10
+  kernel_path_filter: ["/proc/", "/sys/", "/dev/", "/usr/lib/", "/usr/share/", "/lib/"]
+
+engine:
+  userspace_path_ignore: ["/node_modules/", "/.git/objects/", "/__pycache__/", "/.venv/lib/"]
+  session_idle_ttl_s: 21600
+  workspace_root: root_cwd  # root_cwd | git_root   (open decision 2)
+
+rules:
+  builtin: true
+  extra_dirs: ["/etc/agentedr/rules.d"]
+  disabled: []              # rule ids
+  severity_overrides: {}    # rule id -> severity
+
+egress:
+  allow: ["registry.npmjs.org", "pypi.org", "files.pythonhosted.org", "github.com", "api.github.com", "objects.githubusercontent.com", "api.anthropic.com", "api.openai.com", "generativelanguage.googleapis.com"]
+  allow_loopback: true
+  allow_private: false
+  refresh_interval_s: 600
+
+alerts:
+  suppress_window_s: 600
+
+output:
+  dir: /var/log/agentedr
+  db_path: /var/lib/agentedr/sessions.db
+  events: retained          # none | retained | all   (open decision 4)
+  rotate_mib: 50
+  rotate_keep: 5
+  record_raw: null          # path to write raw sensor lines (for offline analysis)
+
+logging:
+  level: INFO
+  format: text              # text | json

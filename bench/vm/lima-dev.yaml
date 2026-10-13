@@ -1,0 +1,55 @@
+# Lima development VM for AgentEDR (Ubuntu 24.04, kernel 6.8).
+#
+# Create (from the repository root):
+#   limactl start --name=agentedr --mount-only "$PWD:w" bench/vm/lima-dev.yaml
+# Shell:
+#   limactl shell --workdir "$PWD" agentedr
+#
+# The repository is mounted read-write at the same path as on the host, so
+# `make sensor` and `make vm-test` can run inside the VM directly on the tree.
+# BPF LSM is enabled by provision step 2; it takes effect after the first
+# `limactl restart agentedr`.
+
+base: template:ubuntu-24.04
+
+cpus: 4
+memory: 6GiB
+disk: 30GiB
+
+provision:
+  # 1. Toolchain for the sensor (clang for BPF, static libs for the loader)
+  #    and Python tooling for the engine.
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update
+      apt-get install -y --no-install-recommends \
+        build-essential clang llvm lld pkg-config git make \
+        libelf-dev zlib1g-dev libzstd-dev libcap-dev binutils-dev \
+        python3 python3-venv curl ca-certificates
+      if ! command -v uv >/dev/null; then
+        curl -LsSf https://astral.sh/uv/0.9.5/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+      fi
+
+  # 2. Enable BPF LSM by appending "bpf" to the active LSM list on the kernel
+  #    command line. Requires a reboot (limactl restart agentedr).
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux
+      if grep -qw bpf /sys/kernel/security/lsm; then exit 0; fi
+      lsms="$(cat /sys/kernel/security/lsm),bpf"
+      echo "GRUB_CMDLINE_LINUX=\"\$GRUB_CMDLINE_LINUX lsm=${lsms}\"" \
+        > /etc/default/grub.d/99-agentedr-bpf-lsm.cfg
+      update-grub
+
+  # 3. Directory for the Linux Python venv, kept outside the shared tree so
+  #    it does not clash with the macOS .venv. The top-level Makefile points
+  #    UV_PROJECT_ENVIRONMENT here when it runs targets in the VM.
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux
+      install -d -o "${LIMA_CIDATA_USER}" /opt/agentedr-venv
