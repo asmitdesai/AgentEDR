@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+dist/
+
+# Sensor build output and bundled binaries
+sensor/build/
+src/agentedr/_bin/
+
+# Development runtime data (agentedr run --dev)
+.agentedr/
+
+# Benchmark recordings may contain sensitive data; never commit by default
+bench/benign/recordings/

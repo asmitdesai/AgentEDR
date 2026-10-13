@@ -1,0 +1,60 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.11"
+      - run: uv sync --locked
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy src
+
+  test:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - run: uv sync --locked
+      # Integration tests skip themselves (not root, no sensor built).
+      - run: uv run pytest -v
+
+  sensor-build:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        arch: [x86_64]   # aarch64 is added in M1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang llvm libelf-dev zlib1g-dev libzstd-dev libcap-dev binutils-dev
+      - run: make sensor
+      - name: Check the binary is static
+        run: |
+          file src/agentedr/_bin/agentedr-sensor-${{ matrix.arch }}
+          file src/agentedr/_bin/agentedr-sensor-${{ matrix.arch }} | grep -q 'statically linked'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agentedr-sensor-${{ matrix.arch }}
+          path: src/agentedr/_bin/agentedr-sensor-${{ matrix.arch }}

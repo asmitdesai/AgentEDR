@@ -1,0 +1,6 @@
+[submodule "sensor/libbpf"]
+	path = sensor/libbpf
+	url = https://github.com/libbpf/libbpf.git
+[submodule "sensor/bpftool"]
+	path = sensor/bpftool
+	url = https://github.com/libbpf/bpftool.git
