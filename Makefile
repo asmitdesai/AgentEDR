@@ -4,6 +4,8 @@
 # Lima VM defined in bench/vm/lima-dev.yaml (instance name: $(LIMA_VM)).
 
 LIMA_VM  ?= agentedr
+# Sensor mode for vm-test: auto | lsm | fentry.
+MODE     ?= auto
 UNAME_S  := $(shell uname -s)
 MACHINE  := $(shell uname -m)
 BIN_DIR  := src/agentedr/_bin
@@ -18,7 +20,7 @@ ifeq ($(UNAME_S),Darwin)
 
 sensor vm-test:
 	limactl shell --workdir "$(CURDIR)" $(LIMA_VM) \
-		env UV_PROJECT_ENVIRONMENT=$(VM_VENV) make $@
+		env UV_PROJECT_ENVIRONMENT=$(VM_VENV) make $@ MODE=$(MODE)
 
 else
 
@@ -30,7 +32,7 @@ sensor:
 
 vm-test: sensor
 	uv sync --quiet
-	sudo $(VENV)/bin/python -m pytest -v tests/integration
+	sudo env AGENTEDR_TEST_MODE=$(MODE) $(VENV)/bin/python -m pytest -v tests/integration
 
 endif
 
