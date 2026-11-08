@@ -1,4 +1,5 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause */
+/* Dual-licensed so that Apache-2.0 userspace can include it (ADR 0017). */
 /*
  * Event structs shared between the BPF programs and the userspace sensor.
  *

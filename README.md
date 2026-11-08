@@ -303,6 +303,9 @@ By design, also after v0.1:
 ## License
 
 - eBPF programs under [`sensor/bpf/`](sensor/bpf/): [GPL-2.0](sensor/bpf/LICENSE)
+- Shared headers [`sensor/bpf/events.h`](sensor/bpf/events.h) and
+  [`sensor/bpf/maps.h`](sensor/bpf/maps.h), which userspace includes: GPL-2.0-only OR
+  [BSD-2-Clause](sensor/bpf/LICENSE.BSD-2-Clause) ([ADR 0017](docs/adr/0017-shared-header-licensing.md))
 - Everything else: [Apache-2.0](LICENSE)
 
 ## Author
