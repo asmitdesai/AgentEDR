@@ -20,7 +20,7 @@ import typer
 
 from agentedr.config import Config, ConfigError, load_config
 from agentedr.models import Event, ExecEvent, ExitEvent
-from agentedr.supervisor import SensorError, Supervisor
+from agentedr.supervisor import ProtocolMismatchError, SensorError, Supervisor
 
 app = typer.Typer(
     help="AgentEDR: kernel-level detection for hijacked AI coding agents.",
@@ -31,6 +31,7 @@ log = logging.getLogger("agentedr")
 
 EXIT_ERROR = 1
 EXIT_USAGE = 2
+EXIT_ENV_UNSUPPORTED = 3
 
 
 class Mode(StrEnum):
@@ -116,6 +117,9 @@ async def _run(config: Config, mode: str | None, allow_nonroot: bool, show_event
     )
     try:
         await sup.start()
+    except ProtocolMismatchError as exc:
+        log.error("%s", exc)
+        return EXIT_ENV_UNSUPPORTED
     except SensorError as exc:
         log.error("%s", exc)
         return EXIT_ERROR

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shlex
 import stat
 import sys
@@ -12,11 +13,18 @@ from pathlib import Path
 
 import pytest
 
+from agentedr.cli import EXIT_ENV_UNSUPPORTED, _run
 from agentedr.config import Config, load_config
 from agentedr.models import Event, ExecEvent, ExitEvent
-from agentedr.supervisor import SensorError, Supervisor
+from agentedr.supervisor import (
+    SUPPORTED_PROTOCOL,
+    ProtocolMismatchError,
+    SensorError,
+    Supervisor,
+)
 
 FAKE_SENSOR = Path(__file__).with_name("fake_sensor.py")
+PROTOCOL_H = Path(__file__).resolve().parents[2] / "sensor/src/protocol.h"
 
 MakeSupervisor = Callable[..., tuple[Supervisor, list[Event]]]
 
@@ -47,6 +55,7 @@ async def test_ready_handshake_and_matchers(make_supervisor: MakeSupervisor) -> 
     ready = await sup.start()
     assert ready.mode == "fentry"
     assert ready.kernel == "6.8.0-fake"
+    assert ready.protocol == SUPPORTED_PROTOCOL
     await sup.ping()
     assert await sup.stop() == 0
 
@@ -146,3 +155,34 @@ async def test_requires_root_unless_allowed(tmp_path: Path) -> None:
     sup = Supervisor(load_config(None), lambda e: None)
     with pytest.raises(SensorError, match="root"):
         await sup.start()
+
+
+# ------------------------------------------------------- protocol (ADR 0014)
+
+
+def test_engine_protocol_matches_sensor_header() -> None:
+    m = re.search(r"^#define AGENTEDR_PROTOCOL (\d+)$", PROTOCOL_H.read_text(), re.MULTILINE)
+    assert m is not None, "AGENTEDR_PROTOCOL not found in protocol.h"
+    assert int(m.group(1)) == SUPPORTED_PROTOCOL
+
+
+async def test_missing_protocol_is_refused(make_supervisor: MakeSupervisor) -> None:
+    sup, _ = make_supervisor("--no-protocol")
+    with pytest.raises(ProtocolMismatchError, match="no protocol version"):
+        await sup.start()
+    assert sup.returncode is not None  # the sensor was stopped
+    assert sup.decoder.malformed == 0
+
+
+async def test_unsupported_protocol_is_refused(make_supervisor: MakeSupervisor) -> None:
+    sup, _ = make_supervisor("--protocol", "2")
+    with pytest.raises(ProtocolMismatchError) as info:
+        await sup.start()
+    msg = str(info.value)
+    assert "protocol 2" in msg and f"supports {SUPPORTED_PROTOCOL}" in msg
+    assert "same release" in msg
+
+
+async def test_protocol_mismatch_exits_with_code_3(make_supervisor: MakeSupervisor) -> None:
+    sup, _ = make_supervisor("--protocol", "99")
+    assert await _run(sup.config, None, True, False) == EXIT_ENV_UNSUPPORTED == 3

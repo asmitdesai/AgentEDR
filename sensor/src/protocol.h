@@ -6,6 +6,15 @@
 #ifndef AGENTEDR_PROTOCOL_H
 #define AGENTEDR_PROTOCOL_H
 
+/*
+ * Protocol version reported in READY (ADR 0014). Increment it on any change
+ * to event fields, event semantics, control lines or commands, and update
+ * SUPPORTED_PROTOCOL in src/agentedr/supervisor.py to match (a test checks
+ * that the two agree).
+ *   1: M0 plus group-exit-aware EXIT (ADR 0001).
+ */
+#define AGENTEDR_PROTOCOL 1
+
 struct agentedr_bpf;
 
 /* Handle one command line (without the trailing newline). Writes the reply

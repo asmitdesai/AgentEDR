@@ -38,7 +38,7 @@ def test_exit_from_bytes() -> None:
 @pytest.mark.parametrize(
     ("line", "cls"),
     [
-        ('{"type":"READY","version":"0.1.0","mode":"lsm","kernel":"6.8.0-45-generic",'
+        ('{"type":"READY","version":"0.1.0","protocol":1,"mode":"lsm","kernel":"6.8.0-45-generic",'
          '"ringbuf_kib":256}', ReadyLine),
         ('{"type":"STATS","ts_ns":0,"ringbuf_drops":0,"tag_map_full":0,"tagged_pids":12,'
          '"events_emitted":4031}', StatsLine),
@@ -89,3 +89,12 @@ def test_blank_line_ignored_not_counted() -> None:
     d = Decoder()
     assert d.parse("\n") is None
     assert d.malformed == 0
+
+
+def test_ready_without_protocol_is_malformed() -> None:
+    # The supervisor checks protocol leniently first (ADR 0014); the strict
+    # model must still reject a READY that lacks it.
+    line = '{"type":"READY","version":"0.1.0","mode":"lsm","kernel":"6.8","ringbuf_kib":256}'
+    dec = Decoder()
+    assert dec.parse(line) is None
+    assert dec.malformed == 1

@@ -22,6 +22,7 @@ class _Line(BaseModel):
 class ReadyLine(_Line):
     type: Literal["READY"]
     version: str
+    protocol: int  # checked leniently before this model is used (ADR 0014)
     mode: Literal["lsm", "fentry"]
     kernel: str
     ringbuf_kib: int

@@ -378,6 +378,7 @@ int main(int argc, char **argv)
         jb_begin(&jb);
         jb_str(&jb, "type", "READY", 8);
         jb_str(&jb, "version", SENSOR_VERSION, 16);
+        jb_int(&jb, "protocol", AGENTEDR_PROTOCOL);
         jb_str(&jb, "mode", mode, 8);
         jb_str(&jb, "kernel", uts.release, sizeof(uts.release));
         jb_int(&jb, "ringbuf_kib", opts.ringbuf_kib);
