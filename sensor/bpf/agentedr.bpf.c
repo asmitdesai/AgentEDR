@@ -5,7 +5,8 @@
  * M0 scope: process lifecycle only (SPEC 6.3).
  *   handle_exec  tp_btf/sched_process_exec   tag agent roots, emit EXEC
  *   handle_fork  tp_btf/sched_process_fork   copy the tag to child processes
- *   handle_exit  tp_btf/sched_process_exit   emit EXIT, drop the tag
+ *   handle_exit  tp_btf/sched_process_exit   when the last thread of a tagged
+ *                                            process dies: emit EXIT, drop the tag
  *
  * "tp_btf" programs attach to raw tracepoints but receive the tracepoint's
  * real, BTF-typed arguments (e.g. struct task_struct *), which is easier and
@@ -239,37 +240,81 @@ int BPF_PROG(handle_fork, struct task_struct *parent, struct task_struct *child)
     return 0;
 }
 
+/*
+ * signal_struct.flags bit set once the whole thread group is exiting
+ * (exit_group(), a fatal signal, or the last thread returning through glibc).
+ * It is a #define in include/linux/sched/signal.h, and #defines are not in
+ * BTF, so it cannot come from vmlinux.h. The value is 0x4 on every kernel we
+ * support; this was checked against the headers of 5.15 and 6.8 (ADR 0001).
+ */
+#define SIGNAL_GROUP_EXIT 0x00000004
+
+/*
+ * Process exit (ADR 0001).
+ *
+ * sched_process_exit fires once per *thread*. A process has really ended only
+ * when its last thread dies, and that is not necessarily the main thread:
+ *   - exec from a worker thread kills the old main thread first (de_thread),
+ *     and the process carries on under the same tgid with the new image;
+ *   - the main thread can pthread_exit() while workers keep running.
+ * Ending the tag on the main thread's exit (as M0 did) loses the tag in both
+ * cases. Instead we use signal->live, the kernel's count of live threads in
+ * the group. do_exit() decrements it before this tracepoint fires, so the
+ * thread that sees 0 is the last one.
+ */
 SEC("tp_btf/sched_process_exit")
 int BPF_PROG(handle_exit, struct task_struct *p)
 {
-    __u32 pid = BPF_CORE_READ(p, pid);
     __u32 tgid = BPF_CORE_READ(p, tgid);
     struct agent_info *info;
+    struct agent_info copy;
     struct exit_event *e;
+    __u32 sflags;
+    int code;
+    int sig;
 
-    /* Fires once per thread; only the thread-group leader's exit counts. */
-    if (pid != tgid)
+    /* Other threads are still alive: the process is still running. live is
+     * an atomic_t; CO-RE reads its plain int member. */
+    if (BPF_CORE_READ(p, signal, live.counter) != 0)
         return 0;
 
     info = bpf_map_lookup_elem(&agent_pids, &tgid);
     if (!info)
         return 0;
 
+    /*
+     * Two threads that die at nearly the same time can both read live == 0
+     * (each reads after its own decrement). Only one of them can delete the
+     * map entry, so the delete decides who emits EXIT: exactly once.
+     * Copy the entry first, because the map value pointer is not valid after
+     * the delete.
+     */
+    copy = *info;
+    if (bpf_map_delete_elem(&agent_pids, &tgid) != 0)
+        return 0;
+
+    /* exit_code and group_exit_code are wait(2) statuses: low 7 bits =
+     * signal, bits 8-15 = exit status. When the group is exiting as a whole,
+     * group_exit_code is the process's real status; the dying thread's own
+     * exit_code may differ (e.g. a worker killed by the group exit). */
+    sflags = BPF_CORE_READ(p, signal, flags);
+    if (sflags & SIGNAL_GROUP_EXIT)
+        code = BPF_CORE_READ(p, signal, group_exit_code);
+    else
+        code = BPF_CORE_READ(p, exit_code);
+    sig = code & 0x7f;
+
     e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
-    if (e) {
-        /* exit_code is a wait(2) status: low 7 bits = signal, bits 8-15 =
-         * exit status. Report it the way shells do: status, or 128 + signal. */
-        int code = BPF_CORE_READ(p, exit_code);
-        int sig = code & 0x7f;
-
-        fill_hdr(&e->h, EV_EXIT, p, info);
-        e->exit_code = sig ? 128 + sig : (code >> 8) & 0xff;
-        e->is_root = tgid == info->root_tgid;
-        bpf_ringbuf_submit(e, 0);
-    } else {
+    if (!e) {
         counter_inc(CTR_RINGBUF_DROPS);
+        return 0;
     }
-
-    bpf_map_delete_elem(&agent_pids, &tgid);
+    /* fill_hdr sets pid = tgid and tid = the dying thread, which may be a
+     * worker rather than the main thread. */
+    fill_hdr(&e->h, EV_EXIT, p, &copy);
+    /* Report the status the way shells do: status, or 128 + signal. */
+    e->exit_code = sig ? 128 + sig : (code >> 8) & 0xff;
+    e->is_root = tgid == copy.root_tgid;
+    bpf_ringbuf_submit(e, 0);
     return 0;
 }
