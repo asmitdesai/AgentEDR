@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import platform
 import sys
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -28,14 +27,9 @@ EVASIONS = REPO / "bench" / "evasions"
 MODE = os.environ.get("AGENTEDR_TEST_MODE", "auto")
 
 
-def _sensor_binary() -> Path | None:
-    for p in (bundled_sensor_path(), REPO / f"sensor/build/agentedr-sensor-{platform.machine()}"):
-        if p.is_file():
-            return p
-    return None
-
-
-SENSOR = _sensor_binary()
+# `make vm-test` installs this machine's own build here right before the tests.
+_BUNDLED = bundled_sensor_path()
+SENSOR = _BUNDLED if _BUNDLED.is_file() else None
 
 if not sys.platform.startswith("linux"):
     pytest.skip("Linux only", allow_module_level=True)

@@ -14,7 +14,9 @@ MACHINE  ?= $(shell uname -m)
 # Kernel-style arch name used by vmlinux.h directories and __TARGET_ARCH_*.
 ARCH     := $(patsubst x86_64,x86,$(patsubst aarch64,arm64,$(MACHINE)))
 
-OUTPUT   := build
+# The top-level Makefile passes OUTPUT=build/<machine name> so that VMs sharing
+# this tree never overwrite each other's objects.
+OUTPUT   ?= build
 LIBBPF_SRC  := $(abspath libbpf/src)
 BPFTOOL_SRC := $(abspath bpftool/src)
 LIBBPF_OBJ  := $(abspath $(OUTPUT)/libbpf.a)
