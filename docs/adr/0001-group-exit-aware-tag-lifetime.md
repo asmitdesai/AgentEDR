@@ -2,7 +2,7 @@
 
 Status: Accepted (2026-11-07)
 Milestone: M0.5
-Related: review NEW-1, NEW-2 (`docs/review/2026-11-product-security-review.md` sections 5.1, 11); SPEC 6.3, 8.2, gotcha 1
+Related: review NEW-1, NEW-2; SPEC 6.3, 8.2, gotcha 1
 
 ## Context
 

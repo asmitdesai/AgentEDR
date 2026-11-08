@@ -77,7 +77,7 @@ matters in practice only when the engine is down or backlogged, which adoption c
   Not adopted now; recorded as the fallback.
 - **(b) In-kernel argv substring match** against a small pattern map. Closes the window
   without extra events, but a bounded substring search over 512 bytes of argv times N
-  patterns runs straight into the verifier complexity limit hit in M0 (worklog section 4).
+  patterns runs straight into the verifier complexity limit hit in M0.
   Not adopted.
 - **No adoption; document "start AgentEDR first".** This leaves the sensor-restart case
   permanently blind. Rejected.

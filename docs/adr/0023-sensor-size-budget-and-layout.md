@@ -2,7 +2,7 @@
 
 Status: Accepted (2026-11-07)
 Milestone: M0.5 (budget), M1a (file split)
-Related: review section 6, decision N6; SPEC 4.1, 18; CLAUDE.md "Sensor rules"
+Related: review section 6, decision N6; SPEC 4.1, 18; contributor sensor rules
 
 ## Context
 
@@ -58,8 +58,8 @@ would hurt the owner's ability to review C, which is the point of the budget.
    bytes of a DNS payload.
 5. **Measuring.** Count with
    `grep -v '^\s*$' FILE | grep -v '^\s*\(/\*\|\*\|//\)' | wc -l` (the method used for M0),
-   recorded in `docs/progress.md` at each milestone end.
-6. CLAUDE.md "Userspace sensor stays under ~600 lines" is updated to these budgets.
+   recorded with the milestone summary at each milestone end.
+6. The contributor rule "Userspace sensor stays under ~600 lines" is updated to these budgets.
 
 ## Alternatives considered
 

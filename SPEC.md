@@ -10,7 +10,7 @@ This document is the single source of truth for building AgentEDR. It is written
 
 ### v0.4 (2026-11-07)
 
-From the product and security review (`docs/review/2026-11-product-security-review.md`, approved 2026-11-07):
+From the product and security review (approved 2026-11-07):
 
 - Tagging: tags end when the whole thread group is dead, not when the main thread exits (ADR 0001). Fixes two verified evasions (exec from a worker thread, main thread exiting first).
 - Process identity is `(pid, start_ns)`; `TAG`/`UNTAG` carry and verify the start time (ADR 0002).
@@ -1677,7 +1677,6 @@ agentedr/
     agentedr.service
   docs/
     adr/                      # architecture decision records
-    review/                   # product and security reviews
     architecture.md
     rules.md
     compatibility.md
@@ -1693,7 +1692,6 @@ agentedr/
   uv.lock
   Makefile
   SPEC.md
-  CLAUDE.md
   README.md
   LICENSE                     # Apache-2.0
 ```
@@ -1702,7 +1700,7 @@ agentedr/
 
 ## 19. Milestones and task breakdown
 
-Each milestone ends with its "Done when" check passing and a short summary written to `docs/progress.md`.
+Each milestone ends with its "Done when" check passing, and the milestone summary is recorded.
 
 ### M0 - Skeleton (done, two "Done when" items pending)
 
@@ -1722,7 +1720,7 @@ Each milestone ends with its "Done when" check passing and a short summary writt
 - [ ] Regression tests: exec from a worker thread; main thread exits first and a worker last (`EXIT` and session end exactly once); worker `exit_group` code; seed `bench/evasions/` with EVA-001 and EVA-002
 - [ ] ADR 0014: `protocol` in READY (protocol 1); engine refuses missing or unsupported protocol
 - [ ] ADR 0017: dual-license `events.h` and `maps.h`; add `sensor/bpf/LICENSE.BSD-2-Clause`
-- [ ] ADR 0023: budgets recorded; line counts in `docs/progress.md`
+- [ ] ADR 0023: budgets recorded; line counts recorded with the milestone summary
 - [ ] CI: actions pinned by commit SHA; Dependabot for GitHub Actions and uv
 - [ ] Real `claude` session check in the VM (also checks how the native installer's exe name is matched, review NEW-19)
 - **Done when:** the M0 "Done when" passes; the ADR 0001 regression tests pass in `make vm-test` on 6.8; CI is green with SHA-pinned actions.
