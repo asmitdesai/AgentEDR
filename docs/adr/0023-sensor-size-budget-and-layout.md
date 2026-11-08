@@ -2,7 +2,7 @@
 
 Status: Accepted (2026-11-07)
 Milestone: M0.5 (budget), M1a (file split)
-Related: review section 6, decision N6; SPEC 4.1, 18; contributor sensor rules
+Related: the M0 sensor already exceeded its line budget; decision N6; SPEC 4.1, 18; contributor sensor rules
 
 ## Context
 

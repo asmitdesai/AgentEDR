@@ -2,7 +2,7 @@
 
 Status: Accepted (2026-11-07)
 Milestone: M1a (list format and enrichment); M2 (tuning from the benign corpus)
-Related: review NEW-7, SE-9a, SE-8; SPEC 11.4, 11.5 (AEDR-001, AEDR-005), 17.7
+Related: routine credential reads by expected programs (`ssh` during `git push`, `npm` reading `~/.npmrc`) would flood AEDR-001; SPEC 11.4, 11.5 (AEDR-001, AEDR-005), 17.7
 
 ## Context
 

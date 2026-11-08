@@ -2,7 +2,7 @@
 
 Status: Accepted (2026-11-07)
 Milestone: M0.5
-Related: review SA-7, decision N5; M0 open items
+Related: Apache-2.0 userspace includes headers that were GPL-2.0 only; decision N5
 
 ## Context
 

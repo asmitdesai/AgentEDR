@@ -1,12 +1,22 @@
 # AgentEDR - Technical Specification
 
-Status: v0.4 (M0 implemented; M0.5 next)
+Status: v0.4.1 (M0 implemented; M0.5 in progress)
 Owner: Asmit Desai
 License: GPL-2.0 (eBPF programs under `sensor/bpf/`), GPL-2.0-only OR BSD-2-Clause (`sensor/bpf/events.h`, `sensor/bpf/maps.h`), Apache-2.0 (everything else)
 
 This document is the single source of truth for building AgentEDR. It is written to be handed to an AI coding assistant (Claude Code) and to a human reviewer. Where a detail must be verified against a real kernel, it is marked **VERIFY**. Architectural decisions are recorded as ADRs in `docs/adr/` and referenced here as "ADR NNNN".
 
 ## Changelog
+
+### v0.4.1 (2026-11-08)
+
+From M0.5 work:
+
+- Kernel session identity is the session root's `(tgid, start_boottime)` instead of a counter (ADR 0024). The counter's fetch-and-add does not compile on the 5.15 arm64 BPF JIT, so the M0 sensor did not load on Ubuntu 22.04 arm64. The BPF object must contain no fetch-class atomics; `make sensor` enforces it. Protocol stays 1 (never released).
+- Ubuntu 22.04 ships Python 3.10; the root-owned install provides its own Python 3.11+ there (4.3, ADR 0011).
+- Every hook M1a ships is verified on 5.15 within M1a (the `path_rename` signature check moves from M1b to M1a).
+- Redaction covers `sshpass -p VALUE` (9.7, ADR 0021).
+- ADR 0001 ordering and `SIGNAL_GROUP_EXIT` verified on 5.15.
 
 ### v0.4 (2026-11-07)
 
@@ -271,8 +281,11 @@ No other runtime dependencies without approval.
 | `CONFIG_SECURITY_PATH=y` | `path_rename` hook (ADR 0005) | `/boot/config-$(uname -r)` when readable; **VERIFY** on 22.04 and 24.04 |
 | `CONFIG_PROC_CHILDREN=y` | `/proc` descendant walk for `TAG` (ADR 0003) | `/proc/self/task/<tid>/children` exists |
 | Lockdown not in `confidentiality` mode | `bpf_probe_read_kernel` is blocked in confidentiality mode | `/sys/kernel/security/lockdown` |
+| No fetch-class BPF atomics (build rule) | The 5.15 arm64 BPF JIT compiles only plain atomic adds; with `CONFIG_BPF_JIT_ALWAYS_ON` other atomics fail the load with ENOTSUPP (ADR 0024) | enforced by `make sensor` |
 
 Targets: Ubuntu 22.04 (5.15) and Ubuntu 24.04 (6.8). On Ubuntu, enabling BPF LSM requires adding `bpf` to the `lsm=` kernel parameter (e.g. via `GRUB_CMDLINE_LINUX`). `lsm=` replaces the whole list, so the value must be the current list from `/sys/kernel/security/lsm` with `bpf` appended; setting `lsm=bpf` alone disables AppArmor, Yama and Landlock. The README must document this, and `agentedr doctor` must detect it and print the exact full value to use. fentry mode loses nothing in monitor mode; only future enforcement needs LSM mode.
+
+Python: the engine needs Python 3.11 or later. Ubuntu 24.04 ships 3.12. Ubuntu 22.04 ships 3.10, which is too old, so the root-owned install (ADR 0011) must provide its own Python 3.11+ on 22.04 rather than use the system interpreter. The development and test VMs pin their venvs to 3.11, the lowest supported version.
 
 ---
 
@@ -331,10 +344,12 @@ All LSM programs return `0`. There is no deny path in v1.
 ### 6.2 Maps
 
 ```c
+/* 16 bytes, no padding. The session's identity is its root process
+ * (ADR 0024); every process of the session carries a copy. */
 struct agent_info {
-    __u64 session_id;     /* kernel-local id, unique per sensor run */
-    __u32 agent_kind;     /* index into matcher table */
+    __u64 root_start_ns;  /* task->start_boottime of the session root, boot ns */
     __u32 root_tgid;      /* tgid of the session root */
+    __u32 agent_kind;     /* index into matcher table */
 };
 
 struct {
@@ -362,10 +377,10 @@ struct {
     __uint(max_entries, 256 * 1024);  /* overridable at load via bpf_map__set_max_entries */
 } events SEC(".maps");
 
-/* global counters: [0]=next_session_id, [1]=ringbuf_drops, [2]=tag_map_full */
+/* global counters: [CTR_RINGBUF_DROPS = 0], [CTR_TAG_MAP_FULL = 1] */
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
-    __uint(max_entries, 4);
+    __uint(max_entries, 2);
     __type(key, __u32);
     __type(value, __u64);
 } counters SEC(".maps");
@@ -380,9 +395,10 @@ struct {
 } path_filter SEC(".maps");
 ```
 
-- Session ids: `__sync_fetch_and_add(&counters[0], 1)`. Kernel ids are only unique within one sensor run; the engine converts them to globally unique session UIDs (section 9.5).
-- Ring buffer reserve failure increments `counters[1]`; the event is lost, never blocks.
-- `agent_pids` insert failure increments `counters[2]`. The engine records every increase as a blind-spot entry on all open sessions (section 9.3), not only as a log line.
+- Session identity: no counter. A session is identified by its root's `(tgid, start_boottime)`, stored in `agent_info` when the root is tagged (ADR 0024). The engine maps it to a globally unique session uid (section 9.5).
+- Counters are only incremented with a plain atomic add whose result is unused. The BPF object must contain no fetch-class atomics (`atomic_fetch_*`, `xchg`, `cmpxchg`); `make sensor` disassembles it and fails otherwise (ADR 0024, gotcha 25).
+- Ring buffer reserve failure increments `counters[CTR_RINGBUF_DROPS]`; the event is lost, never blocks.
+- `agent_pids` insert failure increments `counters[CTR_TAG_MAP_FULL]`. The engine records every increase as a blind-spot entry on all open sessions (section 9.3), not only as a log line.
 - `agent_pids` size is set at load with `--max-tagged N` (config `sensor.max_tagged`, default 16384). The memory cost (roughly 100 bytes per entry including hash overhead; **VERIFY** with `bpftool map show`) is documented in `docs/limitations.md`.
 
 ### 6.3 Tagging logic
@@ -390,7 +406,7 @@ struct {
 **On exec (`handle_exec`):**
 1. Let `tgid` be the current tgid.
 2. If `tgid` is already in `agent_pids`: emit `EXEC` with argv and stop (exec keeps the tgid, so the tag persists across exec).
-3. Otherwise compare the exe basename (from `bprm->filename`, last path component, max 15 chars) against enabled `agent_matchers`. On match: allocate session id, insert `{session_id, kind, root_tgid=tgid}`, emit `EXEC` with `session_start=1`.
+3. Otherwise compare the exe basename (from `bprm->filename`, last path component, max 15 chars) against enabled `agent_matchers`. On match: insert `{root_start_ns = task->start_boottime, root_tgid = tgid, kind}` (ADR 0024), emit `EXEC` with `session_start=1`.
 4. If no match and not tagged: still emit an `EXEC` event marked `untagged=1` **only if** the basename is in a small "candidate interpreter" set (`node`, `bun`, `deno`, `python3`, `env`) so the engine can apply argv matchers. Everything else returns early.
 
 **On fork (`handle_fork`):**
@@ -403,9 +419,9 @@ struct {
 - Read `task->signal->live`. If it is not 0, other threads are alive: return, keeping the tag.
 - If it is 0, look up `agent_pids[tgid]`. If tagged: copy the value, delete the entry, and only if the delete succeeded emit `EXIT` (the delete is the exactly-once arbiter when two threads observe `live == 0`).
 - `EXIT` fields: `pid` = tgid, `tid` = the dying thread; `exit_code` from `signal->group_exit_code` when `SIGNAL_GROUP_EXIT` is set in `signal->flags`, else the thread's `exit_code`, decoded as status or 128 + signal; `is_root = (tgid == root_tgid)`.
-- Verified on 6.8 that `signal->live` is decremented before `trace_sched_process_exit`. **VERIFY** on 5.15.
+- Verified on 6.8 and 5.15 (aarch64) that `signal->live` is decremented before `trace_sched_process_exit`. On 5.15 a single-threaded exit leaves `SIGNAL_GROUP_EXIT` unset, so the thread's own `exit_code` is used (ADR 0001).
 
-**On TAG command from engine (ADRs 0002, 0003):** check the commanded start time against `/proc/<tgid>/stat` field 22, insert the tgid with `BPF_NOEXIST` (an already-tagged tgid is a no-op answered `ok:true` with a note), re-check the start time and roll back on mismatch, then walk `/proc/<tgid>/task/*/children` recursively and insert every descendant with the same value after the same checks. The walk narrows the race between exec and argv-based tagging; the remaining window is measured as `tag_latency_ms` (section 9.4).
+**On TAG command from engine (ADRs 0002, 0003, 0024):** check the commanded start time against `/proc/<tgid>/stat` field 22, insert the tgid with `BPF_NOEXIST` as a new session root (`root_tgid = tgid`, `root_start_ns` = the commanded start time) (an already-tagged tgid is a no-op answered `ok:true` with a note), re-check the start time and roll back on mismatch, then walk `/proc/<tgid>/task/*/children` recursively and insert every descendant with the same value after the same checks. The walk narrows the race between exec and argv-based tagging; the remaining window is measured as `tag_latency_ms` (section 9.4).
 
 **On engine start and after every sensor restart:** the engine adopts already-running agents from `/proc` (section 9.4, ADR 0003).
 
@@ -469,7 +485,7 @@ Line-delimited, UTF-8. One JSON object per line from sensor to engine. Plain-tex
 {"type":"BYE"}
 ```
 
-`protocol` (ADR 0014) is an integer incremented on any change to event fields, event semantics, control lines or commands. Protocol 1 is M0.5; protocol 2 is M1a. The engine refuses to run with a missing or unsupported protocol (exit code 3) and detects bursts of malformed lines after READY as a suspected mismatch.
+`protocol` (ADR 0014) is an integer incremented on any change to event fields, event semantics, control lines or commands. Protocol 1 is M0.5; protocol 2 is M1a. Protocol 1's event header changed during M0.5 (session identity, ADR 0024) without a bump, because protocol 1 was never released; from the first release on, every change bumps it. The engine refuses to run with a missing or unsupported protocol (exit code 3) and detects bursts of malformed lines after READY as a suspected mismatch.
 
 ### 7.2 Engine -> sensor (commands)
 
@@ -503,7 +519,8 @@ Events from one CPU are in order; across CPUs the ring buffer is approximately o
 | `cgroup_id` | int | cgroup v2 id of the task (M1a). Recorded for future container-aware sessions; no v1 rule uses it |
 | `ppid` | int | parent tgid |
 | `uid` | int | real uid |
-| `session_id` | int | kernel-local session id (0 for untagged candidate EXECs) |
+| `session_root_tgid` | int | tgid of the session root (0 for untagged candidate EXECs; ADR 0024) |
+| `session_root_start_ns` | int | session root's start time, boot-clock ns (0 for untagged). With `session_root_tgid` it identifies the session; the engine's key truncates it to a clock tick (section 9.5) |
 | `agent_kind` | int | matcher kind index |
 | `comm` | string | task comm (max 15 chars) |
 
@@ -535,18 +552,24 @@ enum event_type {
     EV_NET_CONNECT, EV_FILE_DELETE, EV_FILE_RENAME, EV_PTRACE,
 };
 
+/* No compiler padding: every field sits at a multiple of its size, and
+ * _Static_asserts on the size and offsets fail the build if that changes.
+ * M0.5 layout is 64 bytes (offsets 0..63, comm at 48); M1a inserts start_ns
+ * and cgroup_id before comm, giving 80 bytes (comm at 64). ADR 0024. */
 struct event_hdr {
-    __u32 type;
-    __u32 pid;          /* tgid */
-    __u32 tid;
-    __u32 ppid;
-    __u32 uid;
-    __u32 agent_kind;
-    __u64 ts_ns;
-    __u64 session_id;
-    __u64 start_ns;     /* group_leader->start_boottime (M1a, ADR 0002) */
-    __u64 cgroup_id;    /* bpf_get_current_cgroup_id() (M1a, open decision 1) */
-    char  comm[16];
+    __u32 type;                   /*  0 */
+    __u32 pid;                    /*  4  tgid */
+    __u32 tid;                    /*  8 */
+    __u32 ppid;                   /* 12 */
+    __u32 uid;                    /* 16 */
+    __u32 agent_kind;             /* 20 */
+    __u32 session_root_tgid;      /* 24  0 = untagged (ADR 0024) */
+    __u32 _reserved;              /* 28  always 0 */
+    __u64 ts_ns;                  /* 32 */
+    __u64 session_root_start_ns;  /* 40  root's start_boottime (ADR 0024) */
+    __u64 start_ns;               /* 48  group_leader->start_boottime (M1a, ADR 0002) */
+    __u64 cgroup_id;              /* 56  bpf_get_current_cgroup_id() (M1a, open decision 1) */
+    char  comm[16];               /* 64 */
 };
 
 struct exec_event {
@@ -597,9 +620,9 @@ struct ptrace_event { struct event_hdr h; __u32 target_pid; __u32 mode; };
 ### 8.4 Example lines
 
 ```json
-{"type":"EXEC","ts_ns":81234567890,"pid":4121,"start_ns":81234566001,"tid":4121,"ppid":4100,"uid":1000,"session_id":3,"agent_kind":0,"comm":"cat","filename":"/usr/bin/cat","argv":["cat","/home/dev/.aws/credentials"],"argv_truncated":false,"session_start":false,"untagged":false}
-{"type":"FILE_OPEN","ts_ns":81234571002,"pid":4121,"start_ns":81234566001,"tid":4121,"ppid":4100,"uid":1000,"session_id":3,"agent_kind":0,"comm":"cat","path":"/home/dev/.aws/credentials","truncated":false,"read":true,"write":false,"create":false,"truncate":false,"append":false}
-{"type":"NET_CONNECT","ts_ns":81299000000,"pid":4180,"start_ns":81298990000,"tid":4180,"ppid":4100,"uid":1000,"session_id":3,"agent_kind":0,"comm":"curl","family":"inet","daddr":"203.0.113.9","dport":443,"socktype":"stream","unix_path":null}
+{"type":"EXEC","ts_ns":81234567890,"pid":4121,"start_ns":81234566001,"tid":4121,"ppid":4100,"uid":1000,"session_root_tgid":4100,"session_root_start_ns":81200000123,"agent_kind":0,"comm":"cat","filename":"/usr/bin/cat","argv":["cat","/home/dev/.aws/credentials"],"argv_truncated":false,"session_start":false,"untagged":false}
+{"type":"FILE_OPEN","ts_ns":81234571002,"pid":4121,"start_ns":81234566001,"tid":4121,"ppid":4100,"uid":1000,"session_root_tgid":4100,"session_root_start_ns":81200000123,"agent_kind":0,"comm":"cat","path":"/home/dev/.aws/credentials","truncated":false,"read":true,"write":false,"create":false,"truncate":false,"append":false}
+{"type":"NET_CONNECT","ts_ns":81299000000,"pid":4180,"start_ns":81298990000,"tid":4180,"ppid":4100,"uid":1000,"session_root_tgid":4100,"session_root_start_ns":81200000123,"agent_kind":0,"comm":"curl","family":"inet","daddr":"203.0.113.9","dport":443,"socktype":"stream","unix_path":null}
 ```
 
 ---
@@ -661,7 +684,7 @@ Processing is single-threaded on the asyncio loop. Any blocking work (SQLite wri
 - Wait up to 10 s for `READY`; on timeout or non-zero exit, log stderr (contains verifier log) and exit with a clear message.
 - Check READY `protocol` before anything else; refuse a missing or unsupported value (ADR 0014).
 - After `READY`: send `SET_MATCHERS`, `SET_PATH_FILTER`, await ACKs, then run the `/proc` adoption scan (ADR 0003).
-- Restart policy: exponential backoff 1 s, 2 s, 4 s ... max 30 s; give up after 5 failures in 5 minutes. On restart, all existing kernel tags are lost: mark open sessions as `interrupted` and end them, then adopt running agents again; a new session whose root `(pid, start_ns)` matches an interrupted session gets `continues=<uid>`.
+- Restart policy: exponential backoff 1 s, 2 s, 4 s ... max 30 s; give up after 5 failures in 5 minutes. On restart, all existing kernel tags are lost: mark open sessions as `interrupted` and end them, then adopt running agents again; a new session whose session key (section 9.5, ADR 0024) matches an interrupted session gets `continues=<uid>`. Adoption rebuilds the key from `/proc`, so the match is exact.
 - Forward sensor stderr to the engine log at WARNING, through the redaction filter.
 - Track `STATS`. Every increase of `ringbuf_drops` or `tag_map_full` while sessions are open becomes a blind-spot record on each open session (`ringbuf_drops_during`, `tag_map_full_during`) and is shown in `status` and `replay`.
 - Heartbeat: every 10 s the engine writes `meta.heartbeat_at` in SQLite. On start, any session that was open at the last heartbeat gets a coverage gap record from the heartbeat time to now (the engine was down).
@@ -682,8 +705,8 @@ Adoption (ADR 0003): after every `READY` and `SET_MATCHERS`, scan `/proc` for th
 ```python
 class Session(BaseModel):
     uid: str  # uuid4 hex, globally unique
-    kernel_id: int  # sensor-local session_id
-    sensor_run: str  # uuid per sensor start
+    root_start_tick: int  # root_start_ns // TICK_NS; with root_pid, the session key (ADR 0024)
+    sensor_run: str  # uuid of the sensor run in which the session started
     agent_kind: str  # "claude-code", "codex", ...
     root_pid: int
     root_exe: str | None
@@ -710,9 +733,9 @@ class Session(BaseModel):
 
 `unsupervised` is `yes` when the root argv contains a configured permission-bypass flag (`agents[].unsupervised_argv`, e.g. Claude Code `--dangerously-skip-permissions`, `--permission-mode bypassPermissions`; Codex `--dangerously-bypass-approvals-and-sandbox`, `--yolo`; Gemini `--approval-mode=yolo`, `--yolo`) or the agent's settings file at session start sets an equivalent mode. Otherwise it is `unknown`, never "no", because modes can be toggled at runtime. Flag names are **VERIFY** per release and recorded in `docs/compatibility.md`.
 
-Mapping: the engine keeps `kernel_id -> Session` for the current sensor run only. Kernel ids restart at 1 after a sensor restart and are never merged across runs. Processes are keyed by `(pid, start_ns)`.
+Mapping: the engine's kernel session key is `(session_root_tgid, session_root_start_ns // TICK_NS * TICK_NS)`, where `TICK_NS = 1e9 / sysconf(_SC_CLK_TCK)` (ADR 0024). It keeps `key -> Session`. The key is stable across sensor restarts: `/proc/<pid>/stat` field 22 is the root's `start_boottime` truncated to ticks by the same division, so a key rebuilt from `/proc` during adoption equals the original. A restart still ends open sessions as `interrupted`; the adopted session is a new session with `continues` set (9.3). Processes are keyed by `(pid, start_ns)`.
 
-Late events: kernel tags of detached descendants outlive the engine's view of a session (`all_exited` or `ttl` end). An event for an ended session within the eviction window reopens it; after eviction, the engine reloads the session from SQLite by `(sensor run, kernel_id)` and appends the event with `late=true`. Events are never dropped for this reason.
+Late events: kernel tags of detached descendants outlive the engine's view of a session (`all_exited` or `ttl` end). An event for an ended session within the eviction window reopens it; after eviction, the engine reloads the most recent session with that key from SQLite and appends the event with `late=true`. Events are never dropped for this reason.
 
 Lifecycle:
 - **Start:** `EXEC` with `session_start=true`, or a successful `TAG`.
@@ -771,14 +794,15 @@ Applied to every string field of events and alerts before any output. Each patte
 | `vault_token` | `\bhvs\.[A-Za-z0-9_-]{20,}\b` |
 | `password_flag` | `(?i)(--password[= ]|--passwd[= ])(?=\S)\S+` (global; keeps the flag, redacts the value) |
 | `password_short_flag` | `^-p(?=\S)(.+)$` on a single argv element (keeps `-p`, redacts the attached value, as in `mysql -pSECRET`). Applied only to argv arrays whose `argv[0]` basename is `mysql`, `mysqldump`, `mariadb`, `mariadb-dump` or `sshpass`; never applied to free text or to other programs' argv (see rules below) |
+| `sshpass_password_arg` | argv-scoped: when the basename of `argv[0]` is `sshpass`, the argv element after a lone `-p` is replaced with `[REDACTED:sshpass_password_arg]` (`sshpass -p VALUE ssh host`). Only for `sshpass`; for `mysql` and `mariadb` a lone `-p` means "prompt" and the next element is not a secret (M1a) |
 | `api_key_header` | `(?i)\b(x-api-key|api-key|x-auth-token)\s*:\s*\S+` |
 
 Rules (ADR 0021):
 - Patterns are linear-time (no nested quantifiers), run on strings of at most 64 KiB, and replace only the secret part. The placeholder never re-matches.
-- All patterns except `password_short_flag` apply globally. `-p<value>` is not redacted globally because it destroys port numbers that egress rules use as evidence (`ssh -p2222`, `nc -p 4444`) and is a normal flag elsewhere (`mkdir -p`, `cp -p`, `git log -p`). `password_short_flag` is argv-scoped: it runs on argv arrays (event `argv`, session `root_argv`, alert `process.argv`, and the same fields in raw recordings) only when the basename of `argv[0]` is in the list above. The separate-argument form (`sshpass -p VALUE`) is not covered by this pattern.
+- All patterns except `password_short_flag` apply globally. `-p<value>` is not redacted globally because it destroys port numbers that egress rules use as evidence (`ssh -p2222`, `nc -p 4444`) and is a normal flag elsewhere (`mkdir -p`, `cp -p`, `git log -p`). `password_short_flag` is argv-scoped: it runs on argv arrays (event `argv`, session `root_argv`, alert `process.argv`, and the same fields in raw recordings) only when the basename of `argv[0]` is in the list above. The separate-argument form is handled by `sshpass_password_arg` below.
 - Redaction applies to every string field of events, alerts, session `root_argv`, stored and exported records, daemon log records (a `logging.Filter` on all handlers) and forwarded sensor stderr.
 - An optional high-entropy detector (`redaction.entropy`, default off) redacts tokens of at least 24 base64url/hex characters with Shannon entropy above 4.0, excluding 40- and 64-character hex strings. Its false-positive trade-off is documented in `docs/rules.md`.
-- Unit tests cover each pattern with positive, negative and boundary cases. `password_short_flag` has positive tests for each listed program (`mysql -pSECRET`, `/usr/bin/mysqldump -pSECRET`, `sshpass -pSECRET`) and negative tests for `ssh -p2222`, `mkdir -p dir`, `cp -p a b` and `git log -p`, asserting the argv is unchanged. Property tests (Hypothesis) cover idempotence, non-re-matching placeholders, unchanged credential paths, and a time budget on 64 KiB adversarial input.
+- Unit tests cover each pattern with positive, negative and boundary cases. `password_short_flag` has positive tests for each listed program (`mysql -pSECRET`, `/usr/bin/mysqldump -pSECRET`, `sshpass -pSECRET`) and negative tests for `ssh -p2222`, `mkdir -p dir`, `cp -p a b` and `git log -p`, asserting the argv is unchanged. `sshpass_password_arg` has a positive test for `sshpass -p VALUE ssh host` and negative tests for `mysql -p dbname` and `ssh -p 2222 host` (unchanged). Property tests (Hypothesis) cover idempotence, non-re-matching placeholders, unchanged credential paths, and a time budget on 64 KiB adversarial input.
 
 Redaction must never touch rule IDs, paths of credential files (the path is evidence, not a secret) or IP addresses.
 
@@ -1321,11 +1345,11 @@ CREATE TABLE IF NOT EXISTS meta (
 
 CREATE TABLE IF NOT EXISTS sessions (
     uid                  TEXT PRIMARY KEY,
-    kernel_id            INTEGER NOT NULL,
     agent_kind           TEXT NOT NULL,
-    sensor_run           TEXT NOT NULL,   -- uuid per sensor start; with kernel_id identifies a kernel session
+    sensor_run           TEXT NOT NULL,   -- uuid of the sensor run in which the session started
     root_pid             INTEGER NOT NULL,
     root_start_ns        INTEGER NOT NULL,
+    root_start_tick      INTEGER NOT NULL, -- root_start_ns // TICK_NS; (root_pid, root_start_tick) is the session key (ADR 0024)
     root_exe             TEXT,
     root_argv            TEXT,            -- JSON array, redacted
     workspace_root       TEXT,
@@ -1346,7 +1370,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     tag_map_full_during  INTEGER NOT NULL DEFAULT 0,
     sensor_mode          TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_sessions_kernel ON sessions(sensor_run, kernel_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_key ON sessions(root_pid, root_start_tick);
 
 CREATE TABLE IF NOT EXISTS coverage_gaps (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1722,8 +1746,11 @@ Each milestone ends with its "Done when" check passing, and the milestone summar
 - [ ] ADR 0017: dual-license `events.h` and `maps.h`; add `sensor/bpf/LICENSE.BSD-2-Clause`
 - [ ] ADR 0023: budgets recorded; line counts recorded with the milestone summary
 - [ ] CI: actions pinned by commit SHA; Dependabot for GitHub Actions and uv
-- [ ] Real `claude` session check in the VM (also checks how the native installer's exe name is matched, review NEW-19)
-- **Done when:** the M0 "Done when" passes; the ADR 0001 regression tests pass in `make vm-test` on 6.8; CI is green with SHA-pinned actions.
+- [ ] ADR 0024: kernel session identity from the root's `(tgid, start_boottime)`; no fetch-class atomics, enforced by `make sensor`
+- [ ] Test VMs: `bench/vm/lima-jammy.yaml` (22.04, GA 5.15, arm64) and `bench/vm/lima-jammy-x86.yaml` (22.04, GA 5.15, x86_64, emulated); per-VM sensor build directories; VM venvs pinned to Python 3.11; `make vm-test MODE=lsm|fentry LIMA_VM=...`
+- [ ] ADR 0001 kernel checks on 5.15: `signal->live` ordering and `SIGNAL_GROUP_EXIT == 0x4`
+- [ ] Real `claude` session check in the VM (also checks how the native installer's versioned executable name is matched)
+- **Done when:** the M0 "Done when" passes; the ADR 0001 regression tests pass in `make vm-test` in both LSM and fentry mode on 6.8 (arm64) and on 5.15 (arm64 and x86_64); the ADR 0001 kernel checks pass on 5.15; CI is green with SHA-pinned actions.
 
 ### M1a - Minimal honest vertical slice (estimate 16-20 days)
 
@@ -1739,9 +1766,10 @@ Each milestone ends with its "Done when" check passing, and the milestone summar
 - [ ] Outputs through `safefs.py` (ADR 0012): JSONL with rotation, raw recording, SQLite store with schema, batched writer and retention; `--dev` at `/var/tmp/agentedr-dev/`
 - [ ] Rules (single-event only): rule and list models, loader, matchers needed by the M1a rules, `credential_consumers`, `agent_instruction_paths`; AEDR-001, AEDR-002, AEDR-003, AEDR-013 with golden TP and near-miss tests; alerts with dedup to JSONL and SQLite
 - [ ] CLI: `run`, `doctor`, `status`, `sessions`, `replay`, `demo --offline`, `demo --live`
-- [ ] Verification tasks (results in `docs/compatibility.md`): `bpf_d_path` at each attach point; `CONFIG_SECURITY_PATH`; `CONFIG_PROC_CHILDREN`; paths in mount namespaces (Claude Code sandbox); io_uring attribution; `/proc/<pid>/root` opens; which process performs each tool action per agent (ADR 0008); agent flag names and instruction file locations; ADR 0001 and 0002 checks on 5.15
+- [ ] Verification tasks (results in `docs/compatibility.md`): `bpf_d_path` at each attach point; `CONFIG_SECURITY_PATH`; `CONFIG_PROC_CHILDREN`; paths in mount namespaces (Claude Code sandbox); io_uring attribution; `/proc/<pid>/root` opens; which process performs each tool action per agent (ADR 0008); agent flag names and instruction file locations; ADR 0002 checks on 5.15 (the ADR 0001 checks were done in M0.5)
 - [ ] Race test for argv tagging (gotcha 12)
-- **Done when:** `agentedr replay` shows a readable timeline of a real agent session covering exec, file, rename and network events; non-agent processes produce zero events; AEDR-001/002/003/013 golden tests pass in CI; `agentedr demo --offline` runs without root; an agent started before the engine is adopted; works in both LSM and fentry mode on Ubuntu 24.04 and in at least fentry mode on 22.04; running as root from a user-writable install is refused.
+- [ ] 5.15 rule: every hook M1a ships is verified on Ubuntu 22.04 (5.15) within M1a, in both LSM and fentry mode, on arm64 and x86_64 (the `lima-jammy*` VMs), including its fentry BTF signature. This includes the `fentry/security_path_rename` signature check (gotcha 24, ADR 0005) and an integration test that `FILE_RENAME` is emitted on 5.15 in both modes
+- **Done when:** `agentedr replay` shows a readable timeline of a real agent session covering exec, file, rename and network events; non-agent processes produce zero events; AEDR-001/002/003/013 golden tests pass in CI; `agentedr demo --offline` runs without root; an agent started before the engine is adopted; works in both LSM and fentry mode on Ubuntu 24.04 and 22.04, with every M1a hook verified on 5.15; running as root from a user-writable install is refused.
 
 ### M1b - Telemetry breadth and tamper (estimate 12-15 days)
 
@@ -1751,7 +1779,6 @@ ADRs 0004, 0006 and 0019 are written at the start of this milestone.
 - [ ] Split ring buffers (high-priority vs bulk) and a separate candidate-EXEC buffer
 - [ ] Fuzzing: libFuzzer for `protocol.c` and `json.c` in CI; Hypothesis for the decoder
 - [ ] CI: aarch64 sensor build; virtme-ng kernel matrix (5.15, 6.8, mainline; LSM and fentry)
-- [ ] Kernel-matrix checks: `fentry/security_path_rename` BTF signature on 5.15 (gotcha 24, ADR 0005), and `FILE_RENAME` emitted on 5.15 in both modes
 - **Done when:** the M1b hooks emit events on 5.15 and 6.8 in both modes in the CI kernel matrix; TCP Fast Open egress from a tagged process is observed (EVA entry passes); a burst of bulk events does not drop high-priority events in the overflow test.
 
 ### M2 - Detections (estimate 14-16 days)
@@ -1828,7 +1855,8 @@ Read these before writing BPF or supervisor code.
 21. **The harness root is an actor.** Agents perform file reads, writes and fetches inside the root process. Never exempt it wholesale (ADR 0008).
 22. **`start_boottime`, not `start_time`.** `/proc/<pid>/stat` field 22 is derived from `start_boottime`, in clock ticks; `start_time` is monotonic (ADR 0002).
 23. **Root running user-owned code.** A root process importing Python from, or executing a binary in, a user-writable location is a privilege escalation. The self-check exists for this (ADR 0011).
-24. **`security_path_rename` signature.** The fentry variant must match the kernel's BTF prototype exactly, and the `flags` argument was added to `security_path_rename` during 5.x. **VERIFY** the prototype on 5.15 (`bpftool btf dump file /sys/kernel/btf/vmlinux format c | grep security_path_rename`) before relying on the fentry variant there; it is a named check in the M1b kernel matrix. The LSM hook (`lsm/path_rename`) is not affected by fentry prototype drift but must be confirmed on 5.15 in the same run.
+24. **`security_path_rename` signature.** The fentry variant must match the kernel's BTF prototype exactly, and the `flags` argument was added to `security_path_rename` during 5.x. **VERIFY** the prototype on 5.15 (`bpftool btf dump file /sys/kernel/btf/vmlinux format c | grep security_path_rename`) before relying on the fentry variant there; it is a named M1a verification task (every M1a hook is verified on 5.15 within M1a). The LSM hook (`lsm/path_rename`) is not affected by fentry prototype drift but must be confirmed on 5.15 in the same run.
+25. **No fetch-class atomics.** Using the return value of `__sync_fetch_and_add` (or any `__sync`/`__atomic` builtin that returns the old value, or exchange/compare-and-swap) emits `atomic_fetch_*`, `xchg` or `cmpxchg`. The 5.15 arm64 JIT cannot compile them, and Ubuntu's `CONFIG_BPF_JIT_ALWAYS_ON` turns that into a load failure with ENOTSUPP (-524) and `bpf_jit: unknown atomic op code` in the kernel log, on 22.04 arm64 only. Plain atomic adds with the result unused are fine. `make sensor` rejects the object otherwise (ADR 0024). Per-CPU read-modify-write is not a substitute: tracing programs can be preempted on the same CPU.
 
 ---
 

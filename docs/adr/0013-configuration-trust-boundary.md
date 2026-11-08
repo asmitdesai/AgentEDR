@@ -2,7 +2,7 @@
 
 Status: Accepted (2026-11-07)
 Milestone: M1a
-Related: review SA-2; SPEC 2, 5, 10, 11.1, 15
+Related: configuration read from user-writable paths would let the agent weaken the policy; SPEC 2, 5, 10, 11.1, 15
 
 ## Context
 
