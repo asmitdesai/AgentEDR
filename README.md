@@ -11,10 +11,11 @@ session that caused it (Claude Code, Codex CLI, Gemini CLI, Cursor agent), inclu
 descendant processes, and runs a small set of high-signal rules that separate a hijacked
 agent from a busy one.
 
-> **Status: early development (M0 of 4 complete).** Session tracking for process
-> exec/fork/exit works end to end. File, network and ptrace telemetry, detection rules and
-> the benchmark are not built yet. See [Roadmap](#roadmap). Do not rely on this for
-> protection today.
+> **Status: early development (M0 complete, M0.5 next).** Session tracking for process
+> exec/fork/exit works end to end, with a known tagging gap that M0.5 fixes (see
+> [Known limitations](#known-limitations)). File, network and ptrace telemetry, detection
+> rules and the benchmark are not built yet. See [Roadmap](#roadmap). Do not rely on this
+> for protection today.
 
 ---
 
@@ -44,14 +45,26 @@ The adversary can place text the agent will read, but cannot run code directly.
 | Attacker objective | Planned rule |
 |---|---|
 | Read credentials (`~/.ssh`, `~/.aws`, `~/.kube`, `.env` outside the workspace, ...) | AEDR-001 |
-| Install persistence (shell rc, systemd user units, crontab, `authorized_keys`, ...) | AEDR-002 |
-| Weaken the agent's own guardrails (permission, sandbox, MCP config) | AEDR-003 |
-| Download and execute a second stage | AEDR-004 |
+| Install persistence (shell rc, systemd user units, crontab, `authorized_keys`, git and ssh config, ...) | AEDR-002 |
+| Weaken the agent's own guardrails (permission, hooks, sandbox, MCP config) | AEDR-003 |
+| Make an injection persistent through global agent instructions or memory (`~/.claude/CLAUDE.md`, `AGENTS.md`, commands, skills) | AEDR-013 |
+| Download and execute a second stage | AEDR-004, AEDR-006 |
 | Exfiltrate credentials | AEDR-005 |
+| Escalate to root (sudo, setuid) | AEDR-009 |
 
-Out of scope: a root attacker, kernel exploits, malicious edits that stay inside the
-workspace and look like normal code changes, and agents running on remote machines.
-Full details in [SPEC.md, section 2](SPEC.md#2-threat-model).
+The agent process itself is not trusted: agents perform many file reads, writes and web
+fetches inside their own process, so rules apply to the agent and to everything it runs.
+
+Out of scope:
+- a root attacker. If the agent's user has passwordless or cached `sudo`, the agent can
+  become root, and AgentEDR cannot protect itself on that machine;
+- kernel exploits;
+- malicious edits that stay inside the workspace and look like normal code changes;
+- agents running on remote machines or inside containers;
+- agents embedded in an IDE (editor extension hosts) rather than run as a CLI.
+
+Full details in [SPEC.md, section 2](SPEC.md#2-threat-model) and the
+[product and security review](docs/review/2026-11-product-security-review.md).
 
 ## Architecture
 
@@ -87,7 +100,10 @@ Design choices worth knowing:
 - **In-kernel filtering.** Only processes descended from a known agent produce events, so
   non-agent workloads see near-zero overhead and Python throughput is never the bottleneck.
 - **CO-RE, not BCC.** The sensor compiles once and runs on supported kernels without a
-  compiler or kernel headers on the target, so the goal is a plain `pip install`.
+  compiler or kernel headers on the target. The planned install is one documented command
+  that creates a root-owned environment in `/opt/agentedr`. AgentEDR runs as root, so it
+  will refuse to run from a location your user (or a hijacked agent running as your user)
+  can modify.
 - **Monitor only.** LSM programs always return 0. Nothing is blocked in v1.
 - **Behaviour, not conversations.** AgentEDR never inspects prompts or model output.
 
@@ -95,7 +111,9 @@ Design choices worth knowing:
 
 - In-kernel session tagging: an exec of a matching agent binary (`claude`, `codex`,
   `cursor-agent`, ...) starts a session; children inherit the session on fork (threads are
-  skipped); exits clean up and report the exit code.
+  skipped); exits clean up and report the exit code. Known gap until M0.5: a process that
+  calls `exec` from a worker thread, or whose main thread exits before its other threads,
+  loses its session tag.
 - Candidate interpreter EXECs (`node`, `bun`, `deno`, `python3`, `env`) are emitted untagged,
   ready for argv-based tagging of agents launched through an interpreter (M1).
 - Static sensor binary with ring buffer streaming, `READY` / `STATS` / `BYE` control lines,
@@ -127,9 +145,19 @@ Example event line from the sensor:
 | BPF LSM active (optional) | LSM mode; otherwise fentry fallback (M1) | `cat /sys/kernel/security/lsm` contains `bpf` |
 | Root | Loading eBPF programs | |
 
-To enable BPF LSM on Ubuntu, append `bpf` to the `lsm=` kernel parameter, for example
-with a file in `/etc/default/grub.d/`, then run `update-grub` and reboot. The dev VM below
-does this for you.
+To enable BPF LSM on Ubuntu, add `bpf` to the `lsm=` kernel parameter, for example with a
+file in `/etc/default/grub.d/`, then run `update-grub` and reboot. `lsm=` replaces the whole
+list, so keep every LSM that is already active and append `bpf`:
+
+```sh
+echo "GRUB_CMDLINE_LINUX=\"\$GRUB_CMDLINE_LINUX lsm=$(cat /sys/kernel/security/lsm),bpf\"" \
+  | sudo tee /etc/default/grub.d/99-bpf-lsm.cfg
+sudo update-grub   # then reboot
+```
+
+Setting `lsm=bpf` on its own would turn off AppArmor and the other active LSMs. The dev VM
+below does this for you. Without BPF LSM, AgentEDR will use fentry mode (from M1a), which
+loses nothing in monitor mode.
 
 Build dependencies: clang/llvm, make, libelf, zlib, zstd, libcap, binutils-dev, git,
 Python 3.11+ and [uv](https://docs.astral.sh/uv/).
@@ -154,6 +182,13 @@ In another terminal, start an agent (for example `claude`). You should see a
 exits. Processes started elsewhere produce nothing.
 
 `--dev` keeps all writable paths under `./.agentedr/` instead of `/var/lib` and `/var/log`.
+
+This development setup runs code from your own checkout as root, and `./.agentedr/` sits in
+your working directory. Do not use it on a machine where an agent you do not trust can write
+to the checkout or to that directory. From M1a, `--dev` writes to a root-only directory in
+`/var/tmp/agentedr-dev/`, and running as root from a user-writable install will need an
+explicit development flag, `--allow-unsafe-install`, which is accepted only together with
+`--dev` and marks every session and alert `integrity: "unverified"`.
 
 ### On macOS (dev VM)
 
@@ -190,7 +225,7 @@ sensor/
 src/agentedr/     Python engine and CLI
 tests/            unit, protocol (fake sensor), integration (fake agent)
 bench/vm/         Lima dev VM
-docs/             progress.md, worklog.md
+docs/             progress.md, worklog.md, adr/ (decision records), review/
 SPEC.md           full technical specification
 ```
 
@@ -200,22 +235,33 @@ track what has been built and the decisions behind it.
 
 ## Roadmap
 
+The plan was re-cut after a [product and security review](docs/review/2026-11-product-security-review.md);
+decisions are recorded as [ADRs](docs/adr/).
+
 | Milestone | Scope | Status |
 |---|---|---|
 | **M0 - Skeleton** | Repo, build, exec/fork/exit tagging, sensor protocol, supervisor, CI | Done (real-`claude` check pending) |
-| **M1 - Telemetry** | File, exec-check, connect, unlink, rename, ptrace hooks (LSM and fentry); path filter; argv tagging with `/proc` walk; enrichment; redaction; SQLite; `doctor`, `status`, `sessions`, `replay` | Next |
-| **M2 - Detections** | Rule engine (single and sequence), egress allowlist, alerts with dedup, AEDR-001 to AEDR-005 with golden tests, `alerts`, `analyze`, `rules` | Planned |
-| **M3 - Benchmark and release** | Attack and benign corpora, one-command benchmark, overhead numbers, wheel with bundled sensors, PyPI v0.1.0 | Planned |
+| **M0.5 - Fix and close M0** | Thread-group-aware exit handling (fixes the tagging gap), protocol version, header licensing, SHA-pinned CI actions, real-`claude` check | Next |
+| **M1a - Vertical slice** | File, exec-check, connect and rename hooks (LSM and fentry); process identity; adoption of already-running agents; sessions, enrichment, workspace detection; redaction; safe outputs; install self-check; SQLite; AEDR-001, 002, 003, 013; `doctor`, `status`, `sessions`, `replay`, `demo` | Planned |
+| **M1b - Telemetry breadth** | Unlink, ptrace, UDP and TCP Fast Open egress, tamper hooks, split ring buffers, fuzzing, aarch64 CI, kernel test matrix | Planned |
+| **M2 - Detections** | Sequence rules and session taint, egress allowlist, AEDR-004, 005, 006, 009, process-tree escape rules, incidents with likely injection source, `explain`, `suppress`, `alerts`, `analyze`, `rules` | Planned |
+| **M3 - Benchmark and release** | Attack, benign and evasion corpora, overhead numbers, root-owned install script, signed release with SBOM and provenance, systemd unit, v0.1.0 | Planned |
 
-Planned v1 rules:
+Moved to v0.2: inode-based file identity (catches hardlinks), DNS query name capture,
+in-kernel rate limiting, deception canaries, OCSF output, desktop notifications.
+
+Planned v0.1 rules:
 
 | Rule | Severity | Detects |
 |---|---|---|
-| AEDR-001 | High | Agent read a credential file outside the workspace |
-| AEDR-002 | Critical | Agent wrote to a persistence location |
-| AEDR-003 | High | Agent modified its own permission or MCP configuration |
+| AEDR-001 | High | Agent read a credential file outside the workspace, and the reader is not the file's expected consumer |
+| AEDR-002 | Critical | Agent wrote (or renamed a file onto) a persistence location |
+| AEDR-003 | High | Agent modified its own permission, hook or MCP configuration |
 | AEDR-004 | High | Agent executed a file it recently wrote to a staging location |
 | AEDR-005 | Critical | Credential read followed by egress to a non-allowlisted destination |
+| AEDR-006 | High | Pipe-to-shell or decode-and-run |
+| AEDR-009 | High | sudo or setuid execution from an agent session |
+| AEDR-013 | High | Agent wrote a global agent instruction or memory file |
 
 Benchmark targets for v0.1.0: at least 90% detection rate, at most 1 false positive per
 agent-hour, under 5% overhead on agent workloads, no measurable overhead elsewhere, under
@@ -223,16 +269,36 @@ agent-hour, under 5% overhead on agent workloads, no measurable overhead elsewhe
 whether or not they meet the targets.
 
 Later: harness hook bridge, more rules, opt-in enforcement for AEDR-002 and AEDR-003 (BPF
-LSM only), OCSF/ECS output, container-aware sessions, unprivileged engine.
+LSM only), ECS output, container-aware sessions, unprivileged engine.
 
 ## Known limitations
 
-- Public rules can be evaded by an attacker who reads them.
-- A root attacker can disable the sensor.
-- Agent matchers depend on vendor packaging and will need updates as agents change.
-- Network attribution is IP-level; domain allowlisting is resolution-based.
+Today (M0):
+- A process in an agent session that calls `exec` from a worker thread, or whose main thread
+  exits while other threads keep running, drops out of the session. Verified on kernel 6.8;
+  fixed in M0.5.
+- An agent that was already running when AgentEDR started is not tracked (adoption arrives
+  in M1a).
+- Only process exec and exit are observed; there is no file, network or ptrace telemetry
+  and no detection yet.
+
+By design, also after v0.1:
+- Public rules can be evaded by an attacker who reads them. Known evasions are kept in an
+  evasion corpus and reported as caught or missed.
+- A root attacker can disable the sensor. That includes an agent whose user has
+  passwordless or cached `sudo`.
+- Agent matchers, flags and config paths depend on vendor packaging and need updates as
+  agents change.
+- Agents embedded in an IDE are not observed; only CLI agents are.
+- Network attribution is IP-level; domain allowlisting is resolution-based. Egress that
+  skips `connect()` (unconnected UDP, TCP Fast Open) is invisible until M1b.
+- File identity is path-based in v0.1, so a hardlink to a credential file is not recognised.
+- Credential access that reads no file is not detected as a credential read (environment
+  variables, desktop keyrings over D-Bus, ssh-agent).
 - Malicious edits inside the workspace are invisible by design.
 - Very long paths and argv are truncated in the kernel.
+- If you opt in to letting your user read alerts without `sudo`, a hijacked agent running as
+  you can read them too.
 - Linux only. No macOS, Windows, containers or remote agents in v1.
 
 ## License
