@@ -63,7 +63,8 @@ static void hdr_fields(struct jbuf *jb, const char *type, const struct event_hdr
     jb_int(jb, "tid", h->tid);
     jb_int(jb, "ppid", h->ppid);
     jb_int(jb, "uid", h->uid);
-    jb_int(jb, "session_id", (int64_t)h->session_id);
+    jb_int(jb, "session_root_tgid", h->session_root_tgid);
+    jb_int(jb, "session_root_start_ns", (int64_t)h->session_root_start_ns);
     jb_int(jb, "agent_kind", h->agent_kind);
     jb_str(jb, "comm", h->comm, sizeof(h->comm));
 }

@@ -15,7 +15,8 @@ import time
 
 EXEC_START = {
     "type": "EXEC", "ts_ns": 1000, "pid": 4100, "tid": 4100, "ppid": 1, "uid": 1000,
-    "session_id": 1, "agent_kind": 0, "comm": "claude", "filename": "/usr/bin/claude",
+    "session_root_tgid": 4100, "session_root_start_ns": 81234566001, "agent_kind": 0,
+    "comm": "claude", "filename": "/usr/bin/claude",
     "argv": ["claude"], "argv_truncated": False, "session_start": True, "untagged": False,
 }  # fmt: skip
 EXEC_CHILD = {
@@ -24,7 +25,8 @@ EXEC_CHILD = {
 }  # fmt: skip
 EXIT_ROOT = {
     "type": "EXIT", "ts_ns": 3000, "pid": 4100, "tid": 4100, "ppid": 1, "uid": 1000,
-    "session_id": 1, "agent_kind": 0, "comm": "claude", "exit_code": 0, "is_root": True,
+    "session_root_tgid": 4100, "session_root_start_ns": 81234566001, "agent_kind": 0,
+    "comm": "claude", "exit_code": 0, "is_root": True,
 }  # fmt: skip
 
 

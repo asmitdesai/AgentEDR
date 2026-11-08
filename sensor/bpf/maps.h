@@ -16,16 +16,30 @@
 #define MATCHER_NAME_LEN 16
 #define PATH_PREFIX_LEN  64
 
-/* Indexes into the counters array map. */
-#define CTR_NEXT_SESSION_ID 0
-#define CTR_RINGBUF_DROPS   1
-#define CTR_TAG_MAP_FULL    2
+/*
+ * Indexes into the counters array map. Counters are only ever incremented
+ * with a plain atomic add whose result is not used. Fetch-class atomics
+ * (atomic_fetch_*, xchg, cmpxchg) are not supported by the arm64 BPF JIT on
+ * 5.15 and are rejected by the build (ADR 0024).
+ */
+#define CTR_RINGBUF_DROPS   0
+#define CTR_TAG_MAP_FULL    1
+#define NUM_COUNTERS        2
 
+/*
+ * Value of agent_pids: which session a tagged process belongs to. Every
+ * process of a session carries a copy of the root's entry (handle_fork). The
+ * session's identity is the root's (tgid, start_boottime) (ADR 0024); no
+ * counter is needed, so the kernel side has no shared state to update.
+ * 16 bytes, no padding.
+ */
 struct agent_info {
-    __u64 session_id;     /* kernel-local id, unique per sensor run */
-    __u32 agent_kind;     /* index into matcher table */
+    __u64 root_start_ns;  /* task->start_boottime of the session root, boot ns */
     __u32 root_tgid;      /* tgid of the session root */
+    __u32 agent_kind;     /* index into matcher table */
 };
+
+_Static_assert(sizeof(struct agent_info) == 16, "agent_info must stay 16 bytes");
 
 struct matcher {
     char basename[MATCHER_NAME_LEN]; /* exe basename, NUL padded (compared against comm-length prefix) */
@@ -56,10 +70,10 @@ struct {
     __uint(max_entries, 256 * 1024);  /* overridable at load via bpf_map__set_max_entries */
 } events SEC(".maps");
 
-/* global counters: [0]=next_session_id, [1]=ringbuf_drops, [2]=tag_map_full */
+/* global counters: [CTR_RINGBUF_DROPS], [CTR_TAG_MAP_FULL] */
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
-    __uint(max_entries, 4);
+    __uint(max_entries, NUM_COUNTERS);
     __type(key, __u32);
     __type(value, __u64);
 } counters SEC(".maps");

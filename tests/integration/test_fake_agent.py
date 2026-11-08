@@ -46,18 +46,18 @@ async def test_fake_agent_session(tmp_path: Path) -> None:
     starts = [e for e in events if isinstance(e, ExecEvent) and e.session_start]
     root_start = [e for e in starts if e.pid == root_pid]
     assert len(root_start) == 1, starts
-    session = root_start[0].session_id
-    assert session > 0
+    session = root_start[0].session_key
+    assert session is not None and session.root_tgid == root_pid
     assert config.agent_kind_name(root_start[0].agent_kind) == "claude-code"
 
     child_execs = {
-        e.comm: e for e in events if isinstance(e, ExecEvent) and e.session_id == session
+        e.comm: e for e in events if isinstance(e, ExecEvent) and e.session_key == session
     }
     assert "git" in child_execs and child_execs["git"].argv == ["git", "--version"]
     assert "cat" in child_execs and child_execs["cat"].ppid == root_pid
 
     root_exit = [e for e in events if isinstance(e, ExitEvent) and e.pid == root_pid]
     assert root_exit[0].is_root and root_exit[0].exit_code == 7
-    assert root_exit[0].session_id == session
+    assert root_exit[0].session_key == session
 
     assert not [e for e in events if e.pid == outsider.pid], "outsider produced events"

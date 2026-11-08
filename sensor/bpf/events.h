@@ -24,17 +24,47 @@ enum event_type {
     EV_NET_CONNECT, EV_FILE_DELETE, EV_FILE_RENAME, EV_PTRACE,
 };
 
+/*
+ * Common header of every event. 64 bytes, laid out so that the compiler adds
+ * no padding (every field sits at a multiple of its own size); the static
+ * asserts below fail the build if that ever stops being true.
+ *
+ *   offset size field
+ *        0    4 type
+ *        4    4 pid                    tgid of the process
+ *        8    4 tid                    thread that triggered the event
+ *       12    4 ppid
+ *       16    4 uid                    real uid
+ *       20    4 agent_kind             index into the matcher table
+ *       24    4 session_root_tgid      session identity, part 1 (ADR 0024)
+ *       28    4 _reserved              always 0
+ *       32    8 ts_ns                  boot clock (bpf_ktime_get_boot_ns)
+ *       40    8 session_root_start_ns  session identity, part 2 (ADR 0024)
+ *       48   16 comm
+ *
+ * The session is identified by its root process: (session_root_tgid,
+ * session_root_start_ns), where the start time is the root's
+ * task->start_boottime. 0/0 means the process is not tagged.
+ */
 struct event_hdr {
     __u32 type;
-    __u32 pid;          /* tgid */
+    __u32 pid;
     __u32 tid;
     __u32 ppid;
     __u32 uid;
     __u32 agent_kind;
+    __u32 session_root_tgid;
+    __u32 _reserved;
     __u64 ts_ns;
-    __u64 session_id;
+    __u64 session_root_start_ns;
     char  comm[COMM_LEN];
 };
+
+_Static_assert(sizeof(struct event_hdr) == 64, "event_hdr must stay 64 bytes");
+_Static_assert(__builtin_offsetof(struct event_hdr, ts_ns) == 32, "event_hdr layout changed");
+_Static_assert(__builtin_offsetof(struct event_hdr, session_root_start_ns) == 40,
+               "event_hdr layout changed");
+_Static_assert(__builtin_offsetof(struct event_hdr, comm) == 48, "event_hdr layout changed");
 
 struct exec_event {
     struct event_hdr h;

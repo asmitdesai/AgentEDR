@@ -69,7 +69,7 @@ async def test_events_are_decoded_and_delivered(make_supervisor: MakeSupervisor)
     assert [e.type for e in events] == ["EXEC", "EXEC", "EXIT"]
     start, child, end = events
     assert isinstance(start, ExecEvent) and start.session_start
-    assert isinstance(child, ExecEvent) and child.session_id == start.session_id
+    assert isinstance(child, ExecEvent) and child.session_key == start.session_key
     assert child.argv == ["git", "status"]
     assert isinstance(end, ExitEvent) and end.is_root
 

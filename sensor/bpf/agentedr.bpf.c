@@ -51,20 +51,12 @@ static __always_inline void counter_inc(__u32 idx)
     __u64 *v = bpf_map_lookup_elem(&counters, &idx);
 
     /* Array map lookups with an in-range key never fail, but the verifier
-     * cannot know that, so the NULL check is mandatory. */
+     * cannot know that, so the NULL check is mandatory.
+     * The result of the add is deliberately unused: clang then emits a plain
+     * atomic add ("lock *(u64 *)(r0 + 0) += r1"). Using the result would make
+     * it a fetch-and-add, which the 5.15 arm64 JIT cannot compile (ADR 0024). */
     if (v)
         __sync_fetch_and_add(v, 1);
-}
-
-static __always_inline __u64 next_session_id(void)
-{
-    __u32 idx = CTR_NEXT_SESSION_ID;
-    __u64 *v = bpf_map_lookup_elem(&counters, &idx);
-
-    if (!v)
-        return 0;
-    /* +1 so the first session is 1; 0 means "no session" in events. */
-    return __sync_fetch_and_add(v, 1) + 1;
 }
 
 static __always_inline void fill_hdr(struct event_hdr *h, __u32 type,
@@ -79,7 +71,10 @@ static __always_inline void fill_hdr(struct event_hdr *h, __u32 type,
     h->ppid = BPF_CORE_READ(task, real_parent, tgid);
     h->uid = (__u32)bpf_get_current_uid_gid(); /* low 32 bits: real uid */
     h->ts_ns = bpf_ktime_get_boot_ns();
-    h->session_id = info ? info->session_id : 0;
+    /* 0/0 = not tagged. Untagged events are only the candidate EXECs. */
+    h->session_root_tgid = info ? info->root_tgid : 0;
+    h->session_root_start_ns = info ? info->root_start_ns : 0;
+    h->_reserved = 0;
     h->agent_kind = info ? info->agent_kind : 0;
     bpf_get_current_comm(h->comm, sizeof(h->comm));
 }
@@ -197,10 +192,17 @@ int BPF_PROG(handle_exec, struct task_struct *p, pid_t old_pid,
         if (!m || !m->enabled || !name16_eq(&base, m->basename))
             continue;
 
+        /* The new session is identified by its root process: tgid plus the
+         * root's start time on the boot clock (ADR 0024). start_boottime is
+         * what /proc/<pid>/stat field 22 is derived from, so the engine can
+         * rebuild the same identity from /proc after a sensor restart. At
+         * this tracepoint p is the thread group leader (exec from a worker
+         * thread has already made it one, and de_thread() copies the old
+         * leader's start_boottime to it). */
         struct agent_info new_info = {
-            .session_id = next_session_id(),
-            .agent_kind = m->agent_kind,
+            .root_start_ns = BPF_CORE_READ(p, start_boottime),
             .root_tgid = tgid,
+            .agent_kind = m->agent_kind,
         };
         if (bpf_map_update_elem(&agent_pids, &tgid, &new_info, BPF_ANY) < 0)
             counter_inc(CTR_TAG_MAP_FULL);
@@ -234,7 +236,7 @@ int BPF_PROG(handle_fork, struct task_struct *parent, struct task_struct *child)
     if (!info)
         return 0;
 
-    /* The child joins the parent's session: same session id, kind and root. */
+    /* The child joins the parent's session: same root identity and kind. */
     if (bpf_map_update_elem(&agent_pids, &child_tgid, info, BPF_ANY) < 0)
         counter_inc(CTR_TAG_MAP_FULL);
     return 0;

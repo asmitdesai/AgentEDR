@@ -23,7 +23,7 @@ from pathlib import Path
 import pytest
 
 from agentedr.cli import _SessionPrinter
-from agentedr.models import Event, ExecEvent, ExitEvent
+from agentedr.models import TICK_NS, Event, ExecEvent, ExitEvent, SessionKey, make_session_key
 
 from ._harness import EVASIONS, make_config, running_sensor, wait_for
 
@@ -55,11 +55,21 @@ def _exits(events: list[Event], pid: int) -> list[ExitEvent]:
     return [e for e in events if isinstance(e, ExitEvent) and e.pid == pid]
 
 
-def _root_session(events: list[Event], root_pid: int) -> int:
+def _root_session(events: list[Event], root_pid: int) -> SessionKey:
     starts = [e for e in events if isinstance(e, ExecEvent) and e.session_start]
     root = [e for e in starts if e.pid == root_pid]
     assert len(root) == 1, starts
-    return root[0].session_id
+    key = root[0].session_key
+    assert key is not None and key.root_tgid == root_pid
+    return key
+
+
+def _proc_start_ns(pid: int) -> int:
+    """Start time from /proc/<pid>/stat field 22, in ns (tick resolution)."""
+    stat = Path(f"/proc/{pid}/stat").read_text()
+    # comm (field 2) may contain spaces and ')'; fields after it start at 3.
+    fields = stat[stat.rindex(")") + 2 :].split()
+    return int(fields[22 - 3]) * TICK_NS
 
 
 def _marker_execs(events: list[Event], marker: str) -> list[ExecEvent]:
@@ -94,7 +104,7 @@ def _child_runner(script: Path, *script_args: str) -> list[str]:
 
 async def _run_child_case(
     tmp_path: Path, fake_agent: Path, script: Path, *script_args: str
-) -> tuple[list[Event], int, ExecEvent]:
+) -> tuple[list[Event], SessionKey, ExecEvent]:
     events, root_pid, _ = await _run_agent(
         tmp_path, fake_agent, *_child_runner(script, *script_args)
     )
@@ -105,7 +115,7 @@ async def _run_child_case(
         if isinstance(e, ExecEvent) and e.ppid == root_pid and str(script) in e.argv
     ]
     assert len(child) == 1, child
-    assert child[0].session_id == session
+    assert child[0].session_key == session
     return events, session, child[0]
 
 
@@ -117,10 +127,10 @@ async def test_case1_exec_from_worker_thread(tmp_path: Path, fake_agent: Path) -
     new_image = [
         e for e in events if isinstance(e, ExecEvent) and e.pid == child.pid and e.comm == "sh"
     ]
-    assert len(new_image) == 1 and new_image[0].session_id == session
+    assert len(new_image) == 1 and new_image[0].session_key == session
     for marker in ("eva001_exec_marker", "eva001_child_marker"):
         hits = _marker_execs(events, marker)
-        assert hits and all(e.session_id == session for e in hits), marker
+        assert hits and all(e.session_key == session for e in hits), marker
 
     # The old main thread's death during exec is not a process exit.
     exits = _exits(events, child.pid)
@@ -134,7 +144,7 @@ async def test_case2_main_thread_exits_first(tmp_path: Path, fake_agent: Path) -
     events, session, child = await _run_child_case(tmp_path, fake_agent, script)
 
     markers = _marker_execs(events, "eva002_marker")
-    assert markers and all(e.session_id == session for e in markers)
+    assert markers and all(e.session_key == session for e in markers)
     exits = _exits(events, child.pid)
     assert len(exits) == 1
     assert exits[0].pid == child.pid  # pid is the tgid even if a worker died last
@@ -175,7 +185,7 @@ async def test_case4_root_main_first_session_ends_once(
 
     session = _root_session(events, agent.pid)
     markers = _marker_execs(events, "eva002_marker")
-    assert markers and all(e.session_id == session for e in markers)
+    assert markers and all(e.session_key == session for e in markers)
     exits = _exits(events, agent.pid)
     assert len(exits) == 1 and exits[0].is_root and exits[0].exit_code == 0
     out = capsys.readouterr().out
@@ -192,7 +202,7 @@ async def test_case5_single_threaded_exit_unchanged(tmp_path: Path, fake_agent: 
     assert len(exits) == 1
     assert exits[0].is_root and exits[0].exit_code == 4
     assert exits[0].tid == root_pid
-    assert exits[0].session_id == _root_session(events, root_pid)
+    assert exits[0].session_key == _root_session(events, root_pid)
 
 
 @pytest.mark.parametrize("exit_call", ["sys.exit(3)", "os._exit(3)"])
@@ -232,3 +242,46 @@ async def test_case_g_multithreaded_root_sigkill(tmp_path: Path, fake_agent: Pat
     exits = _exits(events, agent.pid)
     assert len(exits) == 1
     assert exits[0].is_root and exits[0].exit_code == 137
+
+
+# ------------------------------------------------ session identity (ADR 0024)
+
+
+@pytest.mark.parametrize("exec_from_worker", [False, True])
+async def test_session_key_matches_proc(
+    tmp_path: Path, fake_agent: Path, exec_from_worker: bool
+) -> None:
+    """The kernel's session key can be rebuilt exactly from /proc.
+
+    This is what lets /proc adoption after a sensor restart find the same
+    session. With exec from a worker thread, it also checks that de_thread()
+    keeps the leader's start_boottime (ADR 0002).
+    """
+    if exec_from_worker:
+        script = textwrap.dedent("""
+            import os, threading
+            def w():
+                os.execv("/bin/sh", ["sh", "-c", "echo ready; exec sleep 30"])
+            t = threading.Thread(target=w)
+            t.start()
+            t.join()
+        """)
+    else:
+        script = THREADS_GUARD + "print('ready', flush=True)\nstop.wait()\n"
+    events: list[Event] = []
+    async with running_sensor(make_config(tmp_path), events.append):
+        agent = await asyncio.create_subprocess_exec(
+            str(fake_agent), "-c", script, stdout=asyncio.subprocess.PIPE
+        )
+        assert agent.stdout is not None
+        line = await asyncio.wait_for(agent.stdout.readline(), 5.0)
+        assert line.strip() == b"ready"
+        proc_key = make_session_key(agent.pid, _proc_start_ns(agent.pid))
+        os.kill(agent.pid, signal.SIGKILL)
+        await agent.wait()
+        await wait_for(lambda evs: bool(_exits(evs, agent.pid)), events)
+
+    assert _root_session(events, agent.pid) == proc_key
+    root_events = [e for e in events if e.pid == agent.pid]
+    assert len(root_events) >= 2
+    assert all(e.session_key == proc_key for e in root_events)
