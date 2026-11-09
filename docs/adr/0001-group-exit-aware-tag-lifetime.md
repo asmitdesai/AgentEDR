@@ -2,7 +2,7 @@
 
 Status: Accepted (2026-11-07)
 Milestone: M0.5
-Related: review NEW-1, NEW-2 (`docs/review/2026-11-product-security-review.md` sections 5.1, 11); SPEC 6.3, 8.2, gotcha 1
+Related: tags were lost on exec from a worker thread and when the main thread exited first; SPEC 6.3, 8.2, gotcha 1; ADR 0024 (session identity)
 
 ## Context
 
@@ -75,14 +75,51 @@ fix that only looks at the main thread cannot see the real end of the process.
 
 ## Kernel-version notes
 
-- 6.8 (Ubuntu 24.04, aarch64): verified on 2026-11-07 that `signal->live` is decremented
-  before `trace_sched_process_exit`. A single-threaded exit sees `live == 0`; with
-  main-first exit, the main thread sees 1 and the last worker sees 0; in the exec-from-thread
-  case, the old main thread sees 1. `group_exit_code` uses the wait-status encoding. Results
-  are in the review, section 5.1.
-- 5.15 (Ubuntu 22.04): **VERIFY** the same ordering and the `SIGNAL_GROUP_EXIT` value before
-  M1a closes. If the ordering differs, fall back to treating `live <= 1` at the tracepoint
-  plus the delete arbiter, and document it here.
+Measured with a throwaway probe on `sched_process_exit` that printed `signal->live`,
+`signal->flags`, `signal->group_exit_code` and the thread's `exit_code` for every exiting
+thread of a marked program.
+
+6.8 (Ubuntu 24.04, `6.8.0-142-generic`, aarch64), 2026-11-07:
+
+| Case | Thread | live | flags | group_exit_code | exit_code |
+|---|---|---|---|---|---|
+| single thread, `sys.exit(3)` | main | 0 | 0x4 | 768 | 768 |
+| main `pthread_exit`, worker returns | main | 1 | 0x0 | 0 | 0 |
+| | worker (last) | 0 | 0x4 | 0 | 0 |
+| main `pthread_exit`, worker `os._exit(5)` | main | 1 | 0x0 | 0 | 0 |
+| | worker (last) | 0 | 0x4 | 1280 | 1280 |
+| exec from a worker thread | old main | 1 | 0x0 | 0 | 0 |
+
+5.15 (Ubuntu 22.04, `5.15.0-203-generic`, aarch64), 2026-11-08:
+
+| Case | Thread | live | flags | group_exit_code | exit_code |
+|---|---|---|---|---|---|
+| single thread, `sys.exit(3)` | main | 0 | **0x0** | **0** | 768 |
+| main `pthread_exit`, worker returns | main | 1 | 0x0 | 0 | 0 |
+| | worker (last) | 0 | 0x4 | 0 | 0 |
+| main `pthread_exit`, worker `os._exit(5)` | main | 1 | 0x0 | 0 | 0 |
+| | worker (last) | 0 | 0x4 | 1280 | 1280 |
+| exec from a worker thread | old main | 1 | 0x0 | 0 | 0 |
+| main `sys.exit(3)`, two live workers | main | 1 | 0x4 | 768 | 768 |
+| | worker | 1 | 0x4 | 768 | 768 |
+| | worker (last) | 0 | 0x4 | 768 | 768 |
+
+Conclusions:
+- On both kernels `signal->live` is decremented before `trace_sched_process_exit`, and the
+  last thread to exit sees 0 whether or not it is the main thread. The decision holds
+  unchanged; the `live <= 1` fallback is not needed.
+- In the exec-from-worker case the old main thread exits with `live == 1` on both kernels,
+  so the tag survives the exec.
+- Difference: on 5.15, `do_group_exit()` sets `SIGNAL_GROUP_EXIT` and `group_exit_code` only
+  when other threads exist, so a single-threaded exit has `flags == 0` and
+  `group_exit_code == 0`. Decision 5 falls back to the thread's own `exit_code` in that
+  case, which is correct on both kernels (test case 5).
+- `group_exit_code` uses the same wait-status encoding as `exit_code` (768 = 3 << 8,
+  1280 = 5 << 8).
+- `SIGNAL_GROUP_EXIT` is `0x00000004` in `include/linux/sched/signal.h` of both
+  `5.15.0-203` and `6.8.0-142`.
+- The integration tests (cases 1 to 5, (f), (g)) pass on 6.8 and 5.15, aarch64, in LSM
+  and fentry mode. x86_64 results are recorded in the M0.5 summary.
 - `signal_struct.live` and `group_exit_code` exist on every supported kernel; CO-RE
   relocates the offsets.
 

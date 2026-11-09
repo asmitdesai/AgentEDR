@@ -2,7 +2,7 @@
 
 Status: Accepted (2026-11-07)
 Milestone: M0.5 (protocol field), M1a (schema versions, mismatch detection)
-Related: review SA-4a, SA-4b, NEW-14; SPEC 7, 8, 12, 13
+Related: sensor and engine version skew fails silently, and stored records have no schema version; SPEC 7, 8, 12, 13
 
 ## Context
 

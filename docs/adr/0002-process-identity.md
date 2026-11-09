@@ -2,7 +2,7 @@
 
 Status: Accepted (2026-11-07)
 Milestone: M1a
-Related: review SE-4; SPEC 7.2, 8.1, 8.3, 9.4, 9.5
+Related: pid reuse between an untagged EXEC and TAG, and within long sessions; SPEC 7.2, 8.1, 8.3, 9.4, 9.5; ADR 0024 (session identity, which uses the same start time for the session root)
 
 ## Context
 
@@ -62,10 +62,12 @@ exact.
 
 - `start_boottime` exists since 5.5 (renamed from `real_start_time`), so it is present on
   5.15 and 6.8; CO-RE relocates it.
-- **VERIFY** on 5.15 and 6.8 that `de_thread()` copies `start_boottime` from the old leader
-  to the exec'ing thread, so `start_ns` is stable across exec from a non-main thread
-  (ADR 0001 case 1). If it is not copied, `start_ns` must be taken from the first EXEC of
-  the tgid and carried in `agent_info`.
+- Verified on 5.15 and 6.8 (aarch64, 2026-11-08) that `de_thread()` copies `start_boottime`
+  from the old leader to the exec'ing thread, so the start time is stable across exec from
+  a non-main thread (ADR 0001 case 1): an integration test compares the kernel's session
+  key of such a root with `/proc/<pid>/stat` field 22 (ADR 0024).
+- The session root's start time already travels in `agent_info` and the event header
+  since M0.5 (ADR 0024). This ADR adds the per-process `start_ns` in M1a.
 
 ## Tests
 

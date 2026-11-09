@@ -16,3 +16,7 @@ src/agentedr/_bin/
 
 # Benchmark recordings may contain sensitive data; never commit by default
 bench/benign/recordings/
+
+# Local-only working notes and assistant instructions; never committed
+CLAUDE.md
+notes/

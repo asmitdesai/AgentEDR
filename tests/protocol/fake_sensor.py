@@ -15,7 +15,8 @@ import time
 
 EXEC_START = {
     "type": "EXEC", "ts_ns": 1000, "pid": 4100, "tid": 4100, "ppid": 1, "uid": 1000,
-    "session_id": 1, "agent_kind": 0, "comm": "claude", "filename": "/usr/bin/claude",
+    "session_root_tgid": 4100, "session_root_start_ns": 81234566001, "agent_kind": 0,
+    "comm": "claude", "filename": "/usr/bin/claude",
     "argv": ["claude"], "argv_truncated": False, "session_start": True, "untagged": False,
 }  # fmt: skip
 EXEC_CHILD = {
@@ -24,7 +25,8 @@ EXEC_CHILD = {
 }  # fmt: skip
 EXIT_ROOT = {
     "type": "EXIT", "ts_ns": 3000, "pid": 4100, "tid": 4100, "ppid": 1, "uid": 1000,
-    "session_id": 1, "agent_kind": 0, "comm": "claude", "exit_code": 0, "is_root": True,
+    "session_root_tgid": 4100, "session_root_start_ns": 81234566001, "agent_kind": 0,
+    "comm": "claude", "exit_code": 0, "is_root": True,
 }  # fmt: skip
 
 
@@ -44,6 +46,8 @@ def main() -> int:
     p.add_argument("--ringbuf-kib", default="256")
     p.add_argument("--stats-interval", default="10")
     p.add_argument("--no-ready", action="store_true", help="never print READY")
+    p.add_argument("--protocol", type=int, default=1, help="protocol version to report")
+    p.add_argument("--no-protocol", action="store_true", help="omit protocol from READY")
     p.add_argument("--fail", type=int, help="print to stderr and exit with this code")
     p.add_argument("--reject-matchers", action="store_true")
     p.add_argument("--garbage", action="store_true", help="emit malformed lines before events")
@@ -60,8 +64,13 @@ def main() -> int:
         time.sleep(60)
         return 0
 
-    emit({"type": "READY", "version": "0.1.0", "mode": "fentry",
-          "kernel": "6.8.0-fake", "ringbuf_kib": 256})  # fmt: skip
+    ready: dict[str, object] = {
+        "type": "READY", "version": "0.1.0", "protocol": args.protocol,
+        "mode": "fentry", "kernel": "6.8.0-fake", "ringbuf_kib": 256,
+    }  # fmt: skip
+    if args.no_protocol:
+        del ready["protocol"]
+    emit(ready)
 
     for line in sys.stdin:
         cmd, _, rest = line.strip().partition(" ")

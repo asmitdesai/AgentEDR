@@ -2,7 +2,7 @@
 
 Status: Accepted (2026-11-07)
 Milestone: M0.5
-Related: review SA-7, decision N5; worklog M0 open items; CLAUDE.md "Licensing"
+Related: Apache-2.0 userspace includes headers that were GPL-2.0 only; decision N5
 
 ## Context
 
@@ -22,7 +22,7 @@ licensing unclear: Apache-2.0 and GPL-2.0-only are generally considered incompat
 3. `sensor/bpf/agentedr.bpf.c`, and any future BPF program or hook header, stays GPL-2.0
    and keeps `char LICENSE[] SEC("license") = "GPL";`. Only headers included by userspace
    are dual-licensed.
-4. Update CLAUDE.md "Licensing" and the README license section to state the exception.
+4. Update the contributor instructions and the README license section to state the exception.
 5. The owner is the sole copyright holder of these files (written in this repository by the
    owner with an AI assistant; no outside contributions), so relicensing needs no other
    consent. Future contributions to these two headers are accepted under the dual license
@@ -33,7 +33,7 @@ licensing unclear: Apache-2.0 and GPL-2.0-only are generally considered incompat
 - **Move the headers out of `sensor/bpf/` under Apache-2.0.** The BPF programs, which must
   be GPL-compatible to use GPL-only helpers, would then include Apache-2.0 headers. That
   combination is equally unclear. Rejected.
-- **`LGPL-2.1 OR BSD-2-Clause`** (the worklog's first proposal). Also fine. Rejected only
+- **`LGPL-2.1 OR BSD-2-Clause`** (the first proposal during M0). Also fine. Rejected only
   because the BPF side's license is GPL-2.0, so `GPL-2.0-only` is the natural first option.
 
 ## Consequences

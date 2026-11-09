@@ -2,7 +2,7 @@
 
 Status: Accepted (2026-11-07)
 Milestone: M1a (before any output code lands)
-Related: review SA-1, NEW-9, decision N4; SPEC 5, 9.1, 10, 13, 15
+Related: output files in user-writable locations can be redirected or read by the agent; decision N4; SPEC 5, 9.1, 10, 13, 15
 
 ## Context
 

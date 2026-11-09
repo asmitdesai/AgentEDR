@@ -2,16 +2,16 @@
 
 Status: Accepted (2026-11-07)
 Milestone: M1a
-Related: review SE-2, SE-3, NEW-12, NEW-19, decision N3; SPEC 2.5, 6.3, 9.3, 9.4, 9.5, gotcha 12
+Related: agents running before the engine starts are never tagged; race between exec and argv-based tagging; tags that outlive the session root; versioned executable names from native installers; decision N3; ADR 0024; SPEC 2.5, 6.3, 9.3, 9.4, 9.5, gotcha 12
 
 ## Context
 
 Two gaps leave agents untracked:
 
-- **Pre-existing agents (SE-2).** Tags are created only on exec. An agent that started
+- **Pre-existing agents.** Tags are created only on exec. An agent that started
   before AgentEDR, or before a sensor restart (which loses every kernel tag, SPEC 9.3), is
   invisible.
-- **The argv-tag race (SE-3).** Agents launched through an interpreter (`node .../cli.js`)
+- **The argv-tag race.** Agents launched through an interpreter (`node .../cli.js`)
   are tagged by the engine after an untagged candidate EXEC. Between the EXEC and the `TAG`,
   the process can fork. The `/proc` descendant walk in `TAG` catches children that are still
   alive, but not actions already taken.
@@ -31,7 +31,7 @@ matters in practice only when the engine is down or backlogged, which adoption c
    - **Exe check:** match the basename of `/proc/<pid>/exe` and the basename of `argv[0]`
      from `/proc/<pid>/cmdline` against `exe_basename`. Both are checked because the kernel
      matcher sees the path as invoked (`bprm->filename`, e.g. a `claude` symlink), while
-     `/proc/<pid>/exe` is resolved (e.g. a versioned binary; NEW-19).
+     `/proc/<pid>/exe` is resolved (e.g. a versioned binary installed by a native installer).
    - **Argv check:** apply `argv_contains` to the cmdline.
 3. For each match, walk ancestors via `/proc/<pid>/stat` field 4 (ppid). Adopt only the
    topmost matching process. Nested agents belong to the outer session.
@@ -72,12 +72,11 @@ matters in practice only when the engine is down or backlogged, which adoption c
   - every interpreter on the host (editor servers, language servers, cron jobs) streams
     events until the engine untags it;
   - `UNTAG` must cascade to children forked in the meantime;
-  - the provisional event volume competes with real agent events for the ring buffer
-    (SE-5).
+  - the provisional event volume competes with real agent events for the ring buffer.
   Not adopted now; recorded as the fallback.
 - **(b) In-kernel argv substring match** against a small pattern map. Closes the window
   without extra events, but a bounded substring search over 512 bytes of argv times N
-  patterns runs straight into the verifier complexity limit hit in M0 (worklog section 4).
+  patterns runs straight into the verifier complexity limit hit in M0.
   Not adopted.
 - **No adoption; document "start AgentEDR first".** This leaves the sensor-restart case
   permanently blind. Rejected.

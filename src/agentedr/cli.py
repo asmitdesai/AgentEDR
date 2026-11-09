@@ -11,6 +11,7 @@ import contextlib
 import logging
 import signal
 import sys
+import uuid
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -19,8 +20,8 @@ from typing import Annotated
 import typer
 
 from agentedr.config import Config, ConfigError, load_config
-from agentedr.models import Event, ExecEvent, ExitEvent
-from agentedr.supervisor import SensorError, Supervisor
+from agentedr.models import Event, ExecEvent, ExitEvent, SessionKey
+from agentedr.supervisor import ProtocolMismatchError, SensorError, Supervisor
 
 app = typer.Typer(
     help="AgentEDR: kernel-level detection for hijacked AI coding agents.",
@@ -31,6 +32,7 @@ log = logging.getLogger("agentedr")
 
 EXIT_ERROR = 1
 EXIT_USAGE = 2
+EXIT_ENV_UNSUPPORTED = 3
 
 
 class Mode(StrEnum):
@@ -68,30 +70,39 @@ def main() -> None:
 class _SessionPrinter:
     """Minimal M0 session view: start on session_start EXEC, end on root EXIT.
 
-    Full session lifecycle (descendant tracking, TTL, interrupted) is M1.
+    Each kernel session key (root tgid, root start time; ADR 0024) is mapped to
+    a globally unique session uid. Full session lifecycle (descendant
+    tracking, TTL, interrupted, continues) is M1.
     """
 
     config: Config
     show_events: bool
-    sessions: dict[int, tuple[str, int]] = field(default_factory=dict)
+    # Kept after the session ends so late events of descendants still map
+    # to the same uid.
+    uids: dict[SessionKey, str] = field(default_factory=dict)
+
+    def uid_for(self, key: SessionKey | None) -> str:
+        if key is None:
+            return "-"
+        if key not in self.uids:
+            self.uids[key] = uuid.uuid4().hex
+        return self.uids[key]
 
     def __call__(self, ev: Event) -> None:
         if isinstance(ev, ExecEvent) and ev.untagged:
             return  # argv matching (tagger) arrives in M1
         kind = self.config.agent_kind_name(ev.agent_kind)
+        uid = self.uid_for(ev.session_key)
         if isinstance(ev, ExecEvent) and ev.session_start:
-            self.sessions[ev.session_id] = (kind, ev.pid)
             typer.echo(
-                f"SESSION START  session={ev.session_id} agent={kind} pid={ev.pid} "
+                f"SESSION START  session={uid} agent={kind} pid={ev.pid} "
                 f"exe={ev.filename} argv={_fmt_argv(ev.argv)}"
             )
         elif self.show_events:
-            typer.echo(_fmt_event(ev))
+            typer.echo(_fmt_event(ev, uid))
         if isinstance(ev, ExitEvent) and ev.is_root:
-            self.sessions.pop(ev.session_id, None)
             typer.echo(
-                f"SESSION END    session={ev.session_id} agent={kind} pid={ev.pid} "
-                f"exit_code={ev.exit_code}"
+                f"SESSION END    session={uid} agent={kind} pid={ev.pid} exit_code={ev.exit_code}"
             )
 
 
@@ -100,8 +111,8 @@ def _fmt_argv(argv: list[str], limit: int = 160) -> str:
     return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
-def _fmt_event(ev: Event) -> str:
-    head = f"{ev.type:<5} session={ev.session_id} pid={ev.pid} ppid={ev.ppid} comm={ev.comm}"
+def _fmt_event(ev: Event, uid: str) -> str:
+    head = f"{ev.type:<5} session={uid} pid={ev.pid} ppid={ev.ppid} comm={ev.comm}"
     if isinstance(ev, ExecEvent):
         return f"{head} argv={_fmt_argv(ev.argv)}"
     return f"{head} exit_code={ev.exit_code}"
@@ -116,6 +127,9 @@ async def _run(config: Config, mode: str | None, allow_nonroot: bool, show_event
     )
     try:
         await sup.start()
+    except ProtocolMismatchError as exc:
+        log.error("%s", exc)
+        return EXIT_ENV_UNSUPPORTED
     except SensorError as exc:
         log.error("%s", exc)
         return EXIT_ERROR

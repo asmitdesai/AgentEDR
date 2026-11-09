@@ -37,11 +37,43 @@ ACK_TIMEOUT_S = 5.0
 STOP_TIMEOUT_S = 5.0
 STDERR_TAIL_LINES = 50
 
+# Sensor protocol version this engine speaks (ADR 0014). Must equal
+# AGENTEDR_PROTOCOL in sensor/src/protocol.h; a test checks that.
+SUPPORTED_PROTOCOL = 1
+
 EventHandler = Callable[[Event], None]
 
 
 class SensorError(Exception):
     """The sensor could not be started or stopped responding."""
+
+
+class ProtocolMismatchError(SensorError):
+    """READY had a missing or unsupported protocol version (ADR 0014)."""
+
+
+def ready_protocol_problem(line: bytes) -> str | None:
+    """Check the protocol of a READY line before strict parsing.
+
+    The strict model would reject a READY from an older or newer sensor as a
+    malformed line, and the engine would only see a READY timeout. Reading
+    just ``type`` and ``protocol`` first turns that into a clear error.
+    Returns a description of the problem, or None if the line is not a READY
+    line or its protocol is supported.
+    """
+    try:
+        obj = json.loads(line)
+    except ValueError:
+        return None
+    if not isinstance(obj, dict) or obj.get("type") != "READY":
+        return None
+    proto = obj.get("protocol")
+    fix = "reinstall so that the sensor and the engine come from the same release"
+    if proto is None:
+        return f"sensor READY has no protocol version; engine supports {SUPPORTED_PROTOCOL}; {fix}"
+    if type(proto) is not int or proto != SUPPORTED_PROTOCOL:
+        return f"sensor speaks protocol {proto!r}, engine supports {SUPPORTED_PROTOCOL}; {fix}"
+    return None
 
 
 def bundled_sensor_path() -> Path:
@@ -131,10 +163,12 @@ class Supervisor:
             tail = "\n".join(self.stderr_tail) or "(no stderr output)"
             reason = "timed out waiting for READY" if isinstance(exc, TimeoutError) else str(exc)
             msg = f"sensor failed to start ({reason}, exit code {code}):\n{tail}"
+            if isinstance(exc, ProtocolMismatchError):
+                raise ProtocolMismatchError(msg) from exc
             raise SensorError(msg) from exc
         log.info(
-            "sensor ready: version=%s mode=%s kernel=%s",
-            self.ready.version, self.ready.mode, self.ready.kernel,
+            "sensor ready: version=%s protocol=%d mode=%s kernel=%s",
+            self.ready.version, self.ready.protocol, self.ready.mode, self.ready.kernel,
         )  # fmt: skip
 
         ack = await self.send("SET_MATCHERS " + json.dumps(self.config.kernel_matchers()))
@@ -235,6 +269,11 @@ class Supervisor:
             self._exited.set()
 
     def _dispatch(self, line: bytes) -> None:
+        if self._ready_fut is not None and not self._ready_fut.done():
+            problem = ready_protocol_problem(line)
+            if problem is not None:
+                self._ready_fut.set_exception(ProtocolMismatchError(problem))
+                return
         msg = self.decoder.parse(line)
         if msg is None:
             return

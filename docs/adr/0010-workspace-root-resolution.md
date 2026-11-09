@@ -2,7 +2,7 @@
 
 Status: Accepted (2026-11-07)
 Milestone: M1a
-Related: review SE-11, open decision 2; SPEC 9.6, 10, 11.4, 11.5
+Related: a workspace root taken from a subdirectory under-covers, and one equal to `$HOME` disables credential rules; open decision 2; SPEC 9.6, 10, 11.4, 11.5
 
 ## Context
 
@@ -57,7 +57,7 @@ repos). Agents can also be granted extra directories on the command line (Claude
 
 - Launching from `$HOME` no longer disables AEDR-001; the session is visibly marked
   degraded.
-- The share of degraded sessions is a product metric (PM-7).
+- The share of degraded sessions is a product metric.
 - Agents add flags over time; `extra_root_flags` and `cwd_flags` are config, not code, so
   users can update them without a release.
 

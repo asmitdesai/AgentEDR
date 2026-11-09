@@ -5,18 +5,29 @@ import json
 import pytest
 
 from agentedr.decoder import MAX_LINE_BYTES, Decoder
-from agentedr.models import AckLine, ExecEvent, ExitEvent, ReadyLine, StatsLine
+from agentedr.models import (
+    TICK_NS,
+    AckLine,
+    ExecEvent,
+    ExitEvent,
+    ReadyLine,
+    SessionKey,
+    StatsLine,
+    make_session_key,
+)
 
 # Example lines from SPEC 7.1 and 8.4.
 EXEC_LINE = (
     '{"type":"EXEC","ts_ns":81234567890,"pid":4121,"tid":4121,"ppid":4100,"uid":1000,'
-    '"session_id":3,"agent_kind":0,"comm":"cat","filename":"/usr/bin/cat",'
+    '"session_root_tgid":4100,"session_root_start_ns":81234566001,"agent_kind":0,'
+    '"comm":"cat","filename":"/usr/bin/cat",'
     '"argv":["cat","/home/dev/.aws/credentials"],"argv_truncated":false,'
     '"session_start":false,"untagged":false}'
 )
 EXIT_LINE = (
     '{"type":"EXIT","ts_ns":81300000000,"pid":4100,"tid":4100,"ppid":1,"uid":1000,'
-    '"session_id":3,"agent_kind":0,"comm":"claude","exit_code":0,"is_root":true}'
+    '"session_root_tgid":4100,"session_root_start_ns":81234566001,"agent_kind":0,'
+    '"comm":"claude","exit_code":0,"is_root":true}'
 )
 
 
@@ -25,7 +36,8 @@ def test_exec() -> None:
     ev = d.parse(EXEC_LINE + "\n")
     assert isinstance(ev, ExecEvent)
     assert ev.argv == ["cat", "/home/dev/.aws/credentials"]
-    assert ev.session_id == 3
+    # Start time truncated to a whole clock tick (ADR 0024).
+    assert ev.session_key == SessionKey(4100, 81234566001 // TICK_NS * TICK_NS)
     assert d.decoded == 1 and d.malformed == 0
 
 
@@ -38,7 +50,7 @@ def test_exit_from_bytes() -> None:
 @pytest.mark.parametrize(
     ("line", "cls"),
     [
-        ('{"type":"READY","version":"0.1.0","mode":"lsm","kernel":"6.8.0-45-generic",'
+        ('{"type":"READY","version":"0.1.0","protocol":1,"mode":"lsm","kernel":"6.8.0-45-generic",'
          '"ringbuf_kib":256}', ReadyLine),
         ('{"type":"STATS","ts_ns":0,"ringbuf_drops":0,"tag_map_full":0,"tagged_pids":12,'
          '"events_emitted":4031}', StatsLine),
@@ -89,3 +101,30 @@ def test_blank_line_ignored_not_counted() -> None:
     d = Decoder()
     assert d.parse("\n") is None
     assert d.malformed == 0
+
+
+def test_ready_without_protocol_is_malformed() -> None:
+    # The supervisor checks protocol leniently first (ADR 0014); the strict
+    # model must still reject a READY that lacks it.
+    line = '{"type":"READY","version":"0.1.0","mode":"lsm","kernel":"6.8","ringbuf_kib":256}'
+    dec = Decoder()
+    assert dec.parse(line) is None
+    assert dec.malformed == 1
+
+
+def test_untagged_event_has_no_session_key() -> None:
+    obj = json.loads(EXEC_LINE)
+    obj.update(session_root_tgid=0, session_root_start_ns=0, untagged=True)
+    ev = Decoder().parse(json.dumps(obj))
+    assert isinstance(ev, ExecEvent)
+    assert ev.session_key is None
+
+
+def test_session_key_matches_proc_start_time() -> None:
+    # /proc/<pid>/stat field 22 is start_boottime / TICK_NS (truncating). A
+    # key rebuilt from it after a sensor restart must equal the kernel's key.
+    for start_ns in (TICK_NS * 12345, TICK_NS * 12345 + 1, TICK_NS * 12346 - 1):
+        ticks = start_ns // TICK_NS
+        assert make_session_key(77, start_ns) == make_session_key(77, ticks * TICK_NS)
+    assert make_session_key(77, TICK_NS * 2) != make_session_key(77, TICK_NS * 2 - 1)
+    assert make_session_key(77, TICK_NS) != make_session_key(78, TICK_NS)

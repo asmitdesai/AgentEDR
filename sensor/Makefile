@@ -14,7 +14,9 @@ MACHINE  ?= $(shell uname -m)
 # Kernel-style arch name used by vmlinux.h directories and __TARGET_ARCH_*.
 ARCH     := $(patsubst x86_64,x86,$(patsubst aarch64,arm64,$(MACHINE)))
 
-OUTPUT   := build
+# The top-level Makefile passes OUTPUT=build/<machine name> so that VMs sharing
+# this tree never overwrite each other's objects.
+OUTPUT   ?= build
 LIBBPF_SRC  := $(abspath libbpf/src)
 BPFTOOL_SRC := $(abspath bpftool/src)
 LIBBPF_OBJ  := $(abspath $(OUTPUT)/libbpf.a)
@@ -24,6 +26,7 @@ VMLINUX_DIR := bpf/vmlinux/$(ARCH)
 TARGET      := $(OUTPUT)/agentedr-sensor-$(MACHINE)
 
 CLANG    ?= clang
+LLVM_OBJDUMP ?= llvm-objdump
 CC       ?= cc
 CFLAGS   ?= -g -O2
 CFLAGS   += -Wall -Wextra -std=gnu11 -I$(OUTPUT) -Isrc -Ibpf
@@ -60,6 +63,24 @@ $(OUTPUT)/agentedr.bpf.o: bpf/agentedr.bpf.c $(BPF_HDRS) $(LIBBPF_OBJ) | $(OUTPU
 	$(CLANG) -g -O2 -target bpf -D__TARGET_ARCH_$(ARCH) \
 		-I$(OUTPUT) -I$(VMLINUX_DIR) -Ibpf -c $< -o $@
 	llvm-strip -g $@  # drop DWARF, keep BTF: smaller embedded object
+	@# Reject fetch-class atomics (ADR 0024). The arm64 BPF JIT on 5.15 only
+	@# compiles a plain atomic add; atomic_fetch_*, xchg and cmpxchg make it
+	@# fail, and with CONFIG_BPF_JIT_ALWAYS_ON (Ubuntu) the load then fails
+	@# with ENOTSUPP (-524) on 22.04 arm64 only. x86_64 and newer kernels
+	@# accept them, so nothing else would catch a regression. In C this
+	@# happens whenever the return value of __sync_fetch_and_add (or any
+	@# __sync/__atomic builtin that returns the old value) is used. The
+	@# disassembly goes to a file first so that an objdump failure fails the
+	@# build instead of looking like "no matches". "xchg" also matches
+	@# cmpxchg. "<unknown>" is rejected too: some llvm-objdump versions print
+	@# that for atomic encodings they cannot decode (seen for 32-bit
+	@# fetch-or with -mcpu=v3), and an instruction we cannot inspect must not
+	@# pass.
+	$(LLVM_OBJDUMP) -d --no-show-raw-insn $@ > $@.dis
+	@if grep -nE 'atomic_fetch_|xchg|<unknown>' $@.dis; then \
+		echo "error: $@ contains fetch-class atomics (lines above); see ADR 0024" >&2; \
+		rm -f $@; exit 1; \
+	fi
 
 $(OUTPUT)/agentedr.skel.h: $(OUTPUT)/agentedr.bpf.o $(BPFTOOL)
 	$(BPFTOOL) gen skeleton $< name agentedr_bpf > $@

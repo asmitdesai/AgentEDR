@@ -1,0 +1,74 @@
+# Lima test VM for AgentEDR on Ubuntu 22.04 with the GA 5.15 kernel.
+#
+# This VM exists to run the sensor build and the integration tests on the
+# oldest supported kernel (SPEC 1.1). The development VM (lima-dev.yaml) runs
+# 6.8. Both mount the same tree.
+#
+# Create (from the repository root):
+#   limactl start --name=agentedr-jammy --mount-only "$PWD:w" bench/vm/lima-jammy.yaml
+#   limactl restart agentedr-jammy        # once, to activate BPF LSM
+# Run the tests from macOS:
+#   make sensor vm-test LIMA_VM=agentedr-jammy MODE=lsm
+#   make vm-test LIMA_VM=agentedr-jammy MODE=fentry
+#
+# Kernel: provision step 2 installs the GA kernel metapackage (linux-generic,
+# 5.15) and removes any HWE kernel so that the VM boots 5.15. Check with
+# `uname -r` after the restart.
+
+base: template:ubuntu-22.04
+
+cpus: 4
+memory: 6GiB
+disk: 30GiB
+
+provision:
+  # 1. Toolchain, same packages as lima-dev.yaml. Ubuntu 22.04 ships Python
+  #    3.10; uv installs a managed Python 3.11+ for the engine on `uv sync`.
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update
+      apt-get install -y --no-install-recommends \
+        build-essential clang llvm lld pkg-config git make \
+        libelf-dev zlib1g-dev libzstd-dev libcap-dev binutils-dev \
+        python3 python3-venv curl ca-certificates
+      if ! command -v uv >/dev/null; then
+        curl -LsSf https://astral.sh/uv/0.9.5/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+      fi
+
+  # 2. Pin the GA 5.15 kernel. Cloud images may ship an HWE kernel; install
+  #    the GA metapackage and its headers (the headers are used to check
+  #    SIGNAL_GROUP_EXIT), then remove HWE kernels so GRUB boots 5.15.
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get install -y --no-install-recommends linux-generic linux-headers-generic
+      hwe="$(dpkg-query -W -f='${Package}\n' 'linux-*hwe*' 2>/dev/null | grep -v '^$' || true)"
+      if [ -n "$hwe" ]; then apt-get purge -y $hwe; fi
+      for img in $(dpkg-query -W -f='${Package}\n' 'linux-image-[0-9]*' | grep -v '^linux-image-5\.15\.'); do
+        apt-get purge -y "$img"
+      done
+      update-grub
+
+  # 3. Enable BPF LSM by appending "bpf" to the active LSM list on the kernel
+  #    command line, exactly as lima-dev.yaml does. Requires a reboot.
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux
+      if grep -qw bpf /sys/kernel/security/lsm; then exit 0; fi
+      lsms="$(cat /sys/kernel/security/lsm),bpf"
+      echo "GRUB_CMDLINE_LINUX=\"\$GRUB_CMDLINE_LINUX lsm=${lsms}\"" \
+        > /etc/default/grub.d/99-agentedr-bpf-lsm.cfg
+      update-grub
+
+  # 4. Linux venv outside the shared tree (see lima-dev.yaml step 3).
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux
+      install -d -o "${LIMA_CIDATA_USER}" /opt/agentedr-venv

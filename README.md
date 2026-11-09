@@ -63,8 +63,7 @@ Out of scope:
 - agents running on remote machines or inside containers;
 - agents embedded in an IDE (editor extension hosts) rather than run as a CLI.
 
-Full details in [SPEC.md, section 2](SPEC.md#2-threat-model) and the
-[product and security review](docs/review/2026-11-product-security-review.md).
+Full details in [SPEC.md, section 2](SPEC.md#2-threat-model).
 
 ## Architecture
 
@@ -225,17 +224,17 @@ sensor/
 src/agentedr/     Python engine and CLI
 tests/            unit, protocol (fake sensor), integration (fake agent)
 bench/vm/         Lima dev VM
-docs/             progress.md, worklog.md, adr/ (decision records), review/
+docs/             adr/ (decision records)
 SPEC.md           full technical specification
 ```
 
 [SPEC.md](SPEC.md) is the source of truth for scope, protocol, event schema, rules and
-milestones. [docs/progress.md](docs/progress.md) and [docs/worklog.md](docs/worklog.md)
-track what has been built and the decisions behind it.
+milestones. Architectural decisions and their reasoning are recorded as
+[ADRs](docs/adr/).
 
 ## Roadmap
 
-The plan was re-cut after a [product and security review](docs/review/2026-11-product-security-review.md);
+The plan was re-cut after a product and security review in November 2026; the resulting
 decisions are recorded as [ADRs](docs/adr/).
 
 | Milestone | Scope | Status |
@@ -304,6 +303,9 @@ By design, also after v0.1:
 ## License
 
 - eBPF programs under [`sensor/bpf/`](sensor/bpf/): [GPL-2.0](sensor/bpf/LICENSE)
+- Shared headers [`sensor/bpf/events.h`](sensor/bpf/events.h) and
+  [`sensor/bpf/maps.h`](sensor/bpf/maps.h), which userspace includes: GPL-2.0-only OR
+  [BSD-2-Clause](sensor/bpf/LICENSE.BSD-2-Clause) ([ADR 0017](docs/adr/0017-shared-header-licensing.md))
 - Everything else: [Apache-2.0](LICENSE)
 
 ## Author

@@ -1,8 +1,8 @@
 # Architecture decision records
 
 Each ADR records one decision: context, decision, alternatives, consequences, kernel-version
-notes and tests. ADRs are numbered in the order proposed in
-`docs/review/2026-11-product-security-review.md` (section 8). Planned ADRs are written at the
+notes and tests. ADRs are numbered in the order proposed by the November 2026 product and
+security review. Planned ADRs are written at the
 start of the milestone that needs them.
 
 | ADR | Title | Status | Milestone |
@@ -30,3 +30,4 @@ start of the milestone that needs them.
 | [0021](0021-redaction-and-raw-recording-policy.md) | Redaction and raw recording policy | Accepted | M1a |
 | 0022 | Output formats | Planned | v0.2 |
 | [0023](0023-sensor-size-budget-and-layout.md) | Sensor size budget and file layout | Accepted | M0.5 |
+| [0024](0024-kernel-session-identity-without-fetch-atomics.md) | Kernel session identity without fetch atomics | Accepted | M0.5 |

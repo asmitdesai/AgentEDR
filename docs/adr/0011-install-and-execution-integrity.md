@@ -2,7 +2,7 @@
 
 Status: Accepted (2026-11-07); dev escape hatch amended 2026-11-08 (SPEC 22 decision 9)
 Milestone: M1a (self-check, sensor hash); M3 (install script, release)
-Related: review NEW-8, SA-3, decision N1; SPEC 1.1 G4, 5, 9.3, 14, 15
+Related: a user-writable install run as root is a privilege escalation; sensor binary integrity; decision N1; SPEC 1.1 G4, 5, 9.3, 14, 15
 
 ## Context
 
@@ -23,7 +23,12 @@ equally writable. `sudo` also hides `~/.local/bin` (`secure_path`), so users wou
 
 1. The supported install is a root-owned virtual environment at `/opt/agentedr`, created by
    a documented install script (`deploy/install.sh`, M3) run as root. The script:
-   1. checks for Python 3.11+;
+   1. provides Python 3.11+. Ubuntu 24.04's system Python (3.12) is used as is. Ubuntu
+      22.04 ships Python 3.10, which is below the engine's minimum, so on 22.04 the script
+      installs a root-owned Python 3.11+ under `/opt/agentedr` (for example a pinned,
+      hash-verified standalone CPython build) and creates the venv from it. It never
+      upgrades or replaces the system Python. The interpreter it provides is covered by
+      the self-check in step 3 like any other;
    2. creates `/opt/agentedr` (root:root, 0755) and a venv in `/opt/agentedr/venv`;
    3. installs a pinned AgentEDR version from PyPI with `pip install --require-hashes`
       against a published, hash-pinned requirements file;

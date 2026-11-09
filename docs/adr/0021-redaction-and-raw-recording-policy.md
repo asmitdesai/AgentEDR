@@ -2,7 +2,7 @@
 
 Status: Accepted (2026-11-07)
 Milestone: M1a
-Related: review SE-16, NEW-15, decision N9; SPEC 9.7, 10 (`record_raw`), 15, 17.5, gotcha 15
+Related: common token formats missing from redaction, and raw recordings written unredacted; decision N9; SPEC 9.7, 10 (`record_raw`), 15, 17.5, gotcha 15
 
 ## Context
 
@@ -35,8 +35,13 @@ alerts. Gaps:
    evidence (`ssh -p2222`) and corrupt ordinary flags (`mkdir -p`, `cp -p`, `git log -p`). It
    is a separate kind, `password_short_flag`, applied only to argv arrays whose `argv[0]`
    basename is `mysql`, `mysqldump`, `mariadb`, `mariadb-dump` or `sshpass`, and only to an
-   argv element that starts with `-p` followed by a value. The separate-argument form
-   (`sshpass -p VALUE`) is not covered by this kind.
+   argv element that starts with `-p` followed by a value.
+
+   The separate-argument form is a second argv-scoped kind, `sshpass_password_arg`: when
+   the basename of `argv[0]` is `sshpass`, the element after a lone `-p` is redacted
+   (`sshpass -p VALUE ssh host`). It applies to `sshpass` only. For `mysql` and `mariadb` a
+   lone `-p` means "prompt for the password", and the next element is a database name, not
+   a secret. Added in M1a with the rest of redaction.
 2. **Never redacted:** rule ids, IP addresses, and paths of credential files (the path is
    evidence). Tests assert that no pattern matches representative credential paths.
 3. **Coverage.** Redaction applies to:
@@ -86,6 +91,8 @@ None.
   `mariadb -pSECRET`, `mariadb-dump -pSECRET` and `sshpass -pSECRET`; unchanged for
   `ssh -p2222 host`, `mkdir -p dir`, `cp -p a b` and `git log -p`; unchanged when the same
   text appears in a free-text field rather than an argv array.
+- Unit, `sshpass_password_arg`: `sshpass -p VALUE ssh host` has `VALUE` redacted and the
+  rest unchanged; `mysql -p dbname` and `ssh -p 2222 host` are unchanged.
 - Property tests (Hypothesis, approved as a dev dependency in decision N9):
   - idempotence: `redact(redact(x)) == redact(x)`;
   - placeholders never re-match;

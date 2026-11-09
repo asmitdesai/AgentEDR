@@ -2,7 +2,7 @@
 
 Status: Accepted (2026-11-07)
 Milestone: M1a (rule fields and lists); M2 (egress rules)
-Related: review NEW-6, SE-7d, SE-9, open decision 7; SPEC 9.6, 11.5
+Related: the harness root performs file, fetch and edit actions itself, so exempting it exempts the injected path; open decision 7; SPEC 9.6, 11.5
 
 ## Context
 
@@ -10,8 +10,8 @@ Several tuning ideas assume the agent harness process (the session root) is beni
 children are where hijacked behaviour shows up:
 
 - "exclude writes by the agent root process" (open decision 7, AEDR-003 note);
-- "exclude the harness root" when it reads its own credential store (SE-9);
-- "root egress is normal web fetch and model API, child egress is suspicious" (SE-7).
+- "exclude the harness root" when it reads its own credential store;
+- "root egress is normal web fetch and model API, child egress is suspicious".
 
 That assumption is wrong for current agents:
 

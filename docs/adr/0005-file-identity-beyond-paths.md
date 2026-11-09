@@ -3,7 +3,7 @@
 Status: Accepted (2026-11-07), rename part only
 Milestone: M1a. The inode watchlist and link hooks are deferred: they will be added to this
 ADR at the start of the milestone that builds them (v0.2 per the cut line).
-Related: review NEW-4, SE-6, SE-10d; SPEC 6.1, 6.4, 8.2, 11.5
+Related: atomic replace (write a temp file, then rename it over the target) bypasses open-for-write rules; file identity beyond paths; SPEC 6.1, 6.4, 8.2, 11.5
 
 ## Context
 
@@ -75,8 +75,9 @@ gives a path relative to the mount, not an absolute one.
 - `CONFIG_SECURITY_PATH=y` on Ubuntu 22.04 and 24.04 (AppArmor uses path hooks). **VERIFY**
   in M1a, and have `doctor` check `/boot/config-$(uname -r)` when readable.
 - The `security_path_rename` signature gained `flags` in 5.x. **VERIFY** the BTF signature
-  on 6.8 before writing the fentry variant (M1a) and on 5.15 as a named check in the M1b
-  kernel matrix (SPEC 6.1, gotcha 24).
+  on 6.8 before writing the fentry variant and on 5.15, both within M1a, because M1a ships
+  rename coverage and claims 22.04 support (SPEC 6.1, gotcha 24). M1a also adds an
+  integration test that `FILE_RENAME` is emitted on 5.15 in both modes.
 - **VERIFY** whether `bpf_d_path` is accepted for `lsm/path_rename` and
   `fentry/security_path_rename` on both kernels.
 

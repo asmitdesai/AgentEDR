@@ -1,0 +1,80 @@
+# Lima test VM for AgentEDR: Ubuntu 22.04, GA 5.15 kernel, x86_64.
+#
+# On an Apple Silicon host this VM is fully emulated by QEMU (TCG), so it is
+# slow: expect provisioning to take a long time and the test run several
+# times longer than in the native VMs. It exists because some kernel
+# behaviour differs between architectures (for example, the 5.15 arm64 BPF
+# JIT lacks fetch-class atomics while x86_64 has them; ADR 0024), so 5.15 is
+# tested on both.
+#
+# Host requirements (macOS): `brew install qemu lima-additional-guestagents`.
+#
+# Create (from the repository root):
+#   limactl start --name=agentedr-jammy-x86 --mount-only "$PWD:w" bench/vm/lima-jammy-x86.yaml
+#   limactl restart agentedr-jammy-x86    # once, to activate BPF LSM
+# Run the tests from macOS:
+#   make sensor vm-test LIMA_VM=agentedr-jammy-x86 MODE=lsm
+#   make vm-test LIMA_VM=agentedr-jammy-x86 MODE=fentry
+#
+# The provisioning steps are the same as lima-jammy.yaml.
+
+base: template:ubuntu-22.04
+
+vmType: qemu
+arch: x86_64
+# virtiofs is not available for an emulated guest; reverse-sshfs works.
+mountType: reverse-sshfs
+
+cpus: 4
+memory: 6GiB
+disk: 30GiB
+
+provision:
+  # 1. Toolchain, same packages as lima-dev.yaml. Ubuntu 22.04 ships Python
+  #    3.10; uv installs a managed Python 3.11 for the engine on `uv sync`.
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update
+      apt-get install -y --no-install-recommends \
+        build-essential clang llvm lld pkg-config git make \
+        libelf-dev zlib1g-dev libzstd-dev libcap-dev binutils-dev \
+        python3 python3-venv curl ca-certificates
+      if ! command -v uv >/dev/null; then
+        curl -LsSf https://astral.sh/uv/0.9.5/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+      fi
+
+  # 2. Pin the GA 5.15 kernel (see lima-jammy.yaml step 2).
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get install -y --no-install-recommends linux-generic linux-headers-generic
+      hwe="$(dpkg-query -W -f='${Package}\n' 'linux-*hwe*' 2>/dev/null | grep -v '^$' || true)"
+      if [ -n "$hwe" ]; then apt-get purge -y $hwe; fi
+      for img in $(dpkg-query -W -f='${Package}\n' 'linux-image-[0-9]*' | grep -v '^linux-image-5\.15\.'); do
+        apt-get purge -y "$img"
+      done
+      update-grub
+
+  # 3. Enable BPF LSM by appending "bpf" to the active LSM list on the kernel
+  #    command line, exactly as lima-dev.yaml does. Requires a reboot.
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux
+      if grep -qw bpf /sys/kernel/security/lsm; then exit 0; fi
+      lsms="$(cat /sys/kernel/security/lsm),bpf"
+      echo "GRUB_CMDLINE_LINUX=\"\$GRUB_CMDLINE_LINUX lsm=${lsms}\"" \
+        > /etc/default/grub.d/99-agentedr-bpf-lsm.cfg
+      update-grub
+
+  # 4. Linux venv outside the shared tree (see lima-dev.yaml step 3).
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux
+      install -d -o "${LIMA_CIDATA_USER}" /opt/agentedr-venv

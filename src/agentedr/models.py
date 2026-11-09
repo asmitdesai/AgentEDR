@@ -6,7 +6,8 @@ types are added in M1.
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+import os
+from typing import Annotated, Literal, NamedTuple
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
@@ -22,6 +23,7 @@ class _Line(BaseModel):
 class ReadyLine(_Line):
     type: Literal["READY"]
     version: str
+    protocol: int  # checked leniently before this model is used (ADR 0014)
     mode: Literal["lsm", "fentry"]
     kernel: str
     ringbuf_kib: int
@@ -51,6 +53,31 @@ class ByeLine(_Line):
     type: Literal["BYE"]
 
 
+# --------------------------------------------------------- session identity
+
+# Length of one clock tick in ns. /proc/<pid>/stat field 22 (process start
+# time) has tick resolution, so a session key rebuilt from /proc can only be
+# compared with a key from the kernel at that resolution.
+TICK_NS = 1_000_000_000 // os.sysconf("SC_CLK_TCK")
+
+
+class SessionKey(NamedTuple):
+    """Kernel identity of a session: its root process (ADR 0024).
+
+    ``root_start_ns`` is the root's start time on the boot clock, truncated to
+    a whole clock tick. The kernel reports nanoseconds; truncating with the
+    same division the kernel uses for /proc field 22 means a key rebuilt from
+    /proc (adoption after a sensor restart) equals the original key exactly.
+    """
+
+    root_tgid: int
+    root_start_ns: int
+
+
+def make_session_key(root_tgid: int, root_start_ns: int) -> SessionKey:
+    return SessionKey(root_tgid, root_start_ns // TICK_NS * TICK_NS)
+
+
 # ------------------------------------------------------------------ events
 
 
@@ -60,9 +87,17 @@ class EventBase(_Line):
     tid: int = Field(ge=0)
     ppid: int = Field(ge=0)
     uid: int = Field(ge=0)
-    session_id: int = Field(ge=0)
+    session_root_tgid: int = Field(ge=0)  # 0 with start 0: not tagged
+    session_root_start_ns: int = Field(ge=0)
     agent_kind: int = Field(ge=0)
     comm: str
+
+    @property
+    def session_key(self) -> SessionKey | None:
+        """The session this event belongs to, or None if untagged."""
+        if self.session_root_tgid == 0:
+            return None
+        return make_session_key(self.session_root_tgid, self.session_root_start_ns)
 
 
 class ExecEvent(EventBase):
